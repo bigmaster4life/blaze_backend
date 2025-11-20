@@ -1,7 +1,7 @@
 # RideVTC/serializers.py
 
 from rest_framework import serializers
-from .models import RideVehicle, Ride
+from .models import RideVehicle, Ride, DriverNavEvent
 import re
 
 PLUSCODE_RX = re.compile(r"^[23456789CFGHJMPQRVWX]+\+[\dA-Z]{2,}.*$", re.IGNORECASE)
@@ -105,3 +105,8 @@ class DriverVehicleMeSerializer(serializers.ModelSerializer):
             'brand', 'model', 'plate', 'color', 'year',
             'insurance_valid_until', 'technical_valid_until',
         ]
+class DriverNavEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DriverNavEvent
+        fields = "__all__"
+        read_only_fields = ("driver", "created_at")

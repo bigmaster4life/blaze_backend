@@ -63,6 +63,10 @@ class Ride(models.Model):
     dropoff_lng = models.FloatField(null=True, blank=True)
     distance_km = models.FloatField()
     price = models.DecimalField(max_digits=10, decimal_places=2)
+    final_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    pause_started_at = models.DateTimeField(null=True, blank=True)
+    total_pause_seconds = models.PositiveIntegerField(default=0)
+    pause_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     requested_at = models.DateTimeField(auto_now_add=True)
     accepted_at = models.DateTimeField(null=True, blank=True)
@@ -81,6 +85,7 @@ class Payment(models.Model):
     WALLET_CHOICES = (
         ("MOBILE_MONEY", "Mobile Money"),
         ("BLAZE", "Blaze Wallet"),
+        ("CASH", "Cash"),
     )
     STATUS_CHOICES = (
         ("PENDING", "Pending"),
@@ -89,6 +94,7 @@ class Payment(models.Model):
     )
     PROVIDER_CHOICES = (
         ("AIRTEL_MONEY", "Airtel Money"),
+        ("CASH", "Cash"),
         # plus tard: ("MOOV_MONEY", "Moov Money"),
     )
 
@@ -139,3 +145,59 @@ class DriverRating(models.Model):
     rating = models.PositiveSmallIntegerField()  # 1..5
     comment = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
+
+# --- Presence chauffeur (WS heartbeat) ---
+class DriverPresence(models.Model):
+    """
+    Suivi de l'état en ligne/offline d'un chauffeur.
+    On met à jour is_online/last_seen à la connexion WS, ping périodique, et à la déconnexion.
+    """
+    driver = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="presence"
+    )
+    is_online = models.BooleanField(default=False)
+    last_seen = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Presence(driver={self.driver_id}, online={self.is_online}, last_seen={self.last_seen})"
+    
+
+class DriverNavEvent(models.Model):
+    class EventType(models.TextChoices):
+        NAV_STARTED     = "nav_started"
+        REROUTE         = "reroute"
+        OFF_ROUTE       = "off_route"
+        ETA_UPDATE      = "eta_update"
+        ARRIVED_PICKUP  = "arrived_pickup"
+        ARRIVED_DROPOFF = "arrived_dropoff"
+        PAUSE_NAV       = "pause_nav"
+        RESUME_NAV      = "resume_nav"
+        ERROR           = "error"
+
+    driver = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="ridevtc_nav_events"
+    )
+    request_id = models.CharField(max_length=64, db_index=True)
+    event_type = models.CharField(max_length=32, choices=EventType.choices, db_index=True)
+
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    heading = models.FloatField(null=True, blank=True)
+    speed = models.FloatField(null=True, blank=True)
+
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["driver", "created_at"]),
+            models.Index(fields=["request_id", "created_at"]),
+        ]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.driver_id} {self.event_type} {self.request_id}"

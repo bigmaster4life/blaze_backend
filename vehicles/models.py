@@ -139,6 +139,38 @@ class Rental(models.Model):
         price = Decimal(self.vehicle.daily_price or 0)
         self.total_amount = price * Decimal(self._night_count())
 
+    def mark_paid_mobile(self, amount=None):
+        """
+        Appelée quand le paiement Mobile Money est confirmé.
+        Passe le statut de la location à 'confirmed'.
+        """
+        from decimal import Decimal
+
+        if amount is not None:
+            try:
+                self.total_amount = Decimal(str(amount))
+            except Exception:
+                if not self.total_amount or str(self.total_amount) == "0":
+                    self.recompute_total()
+        else:
+            if not self.total_amount or str(self.total_amount) == "0":
+                self.recompute_total()
+
+        if self.status in ("pending", "expired"):
+            self.status = "confirmed"
+        self.payment_method = "mobile"
+
+        if not self.identification_code:
+            self.identification_code = generate_ident_code()
+        self.save(update_fields=[
+            "status",
+            "payment_method",
+            "identification_code",
+            "total_amount",
+        ])
+        set_vehicle_availability(self.vehicle)
+            
+
 def generate_ident_code(length=6) -> str:
     alphabet = string.ascii_uppercase + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
@@ -174,3 +206,35 @@ class VehicleBooking(models.Model):
         indexes = [
             models.Index(fields=['vehicle', 'start_at', 'end_at']),
         ]
+
+class RentalPayment(models.Model):
+    STATUS_CHOICES = [
+        ("PENDING", "En attente"),
+        ("SUCCESS", "Réussi"),
+        ("FAILED", "Échoué"),
+    ]
+
+    rental = models.ForeignKey(
+        Rental,
+        on_delete=models.CASCADE,
+        related_name="payments",
+    )
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    currency = models.CharField(max_length=3, default="XAF")
+    wallet = models.CharField(max_length=32, default="MOBILE_MONEY")
+    msisdn = models.CharField(max_length=32, blank=True, null=True)
+    provider = models.CharField(max_length=32, blank=True, null=True)
+
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="PENDING")
+    provider_txid = models.CharField(max_length=128, blank=True, null=True)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    meta = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"RentalPayment #{self.pk} rental={self.rental_id} {self.status}"

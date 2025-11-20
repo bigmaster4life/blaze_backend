@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     'RideVTC',
     'mapsproxy',
     'analytics',
+    'notifications.apps.NotificationsConfig',
 ]
 
 ASGI_APPLICATION = 'blaze_backend.asgi.application'
@@ -286,3 +287,6 @@ AIRTEL_MONEY = {
     "PATH_INIT":  env("AIRTEL_PATH_INIT",  default="/merchant/v1/payments/initiate"),
     "WEBHOOK_SECRET": env("AIRTEL_WEBHOOK_SECRET", default=None),
 }
+
+PAUSE_FREE_SECONDS = 5 * 60
+PAUSE_RATE_PER_MIN = 250  # XAF

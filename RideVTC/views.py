@@ -2,7 +2,7 @@
 
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.views import APIView
-from .models import RideVehicle, Ride, Payment, DriverStats, DriverRating
+from .models import RideVehicle, Ride, Payment, DriverStats, DriverRating, DriverPresence, DriverNavEvent
 from .serializers import (
     RideVehicleSerializer,
     RideCreateSerializer,
@@ -10,12 +10,13 @@ from .serializers import (
     RideOutSerializer,
     DriverLocationSerializer,
     RateDriverSerializer,
-    DriverVehicleMeSerializer
+    DriverVehicleMeSerializer,
+    DriverNavEventSerializer
 )
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db import transaction
 from django.shortcuts import get_object_or_404
-from rest_framework import viewsets, status, permissions
+from rest_framework import viewsets, status, permissions, filters, mixins
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from .utils.rooms import user_room, driver_room, pool_room
@@ -27,11 +28,17 @@ from RideVTC.utils.payments import (
     map_status,
 )
 from django.utils import timezone
+from django.conf import settings
 from RideVTC.utils.payloads import build_ride_offer_payload
 import re
 import logging
 import time
 from decimal import Decimal
+from math import ceil
+from django.db.models import Count, Avg
+from django.db.models.functions import TruncHour
+from .permissions import IsDriverOrStaff
+from users.models import CustomerProfile
 
 from asgiref.sync import async_to_sync
 try:
@@ -44,8 +51,24 @@ from .ws import app_ws_send  # mock WS; remplace par ta vraie intégration si di
 
 logger = logging.getLogger(__name__)
 
+def _has_success_payment(ride):
+    return Payment.objects.filter(ride=ride, status="SUCCESS").exists()
+
 def ride_has_success_payment(ride: Ride) -> bool:
     return Payment.objects.filter(ride=ride, status='SUCCESS').exists()
+
+def _pause_seconds_now(ride):
+    total = ride.total_pause_seconds or 0
+    if ride.pause_started_at:
+        total += int((timezone.now() - ride.pause_started_at).total_seconds())
+    return total
+
+def _compute_pause_fee(total_seconds: int) -> int:
+    free = int(getattr(settings, "PAUSE_FREE_SECONDS", 300))
+    rate = int(getattr(settings, "PAUSE_RATE_PER_MIN", 250))
+    extra = max(0, total_seconds - free)
+    mins = ceil(extra / 60) if extra > 0 else 0
+    return mins * rate  # XAF (int)
 
 
 
@@ -91,6 +114,20 @@ class RideViewSet(viewsets.ModelViewSet):
     queryset = Ride.objects.all().order_by("-id")
     permission_classes = [permissions.IsAuthenticated]
 
+    def _pause_seconds_now(ride):
+        """Retourne le total cumulé + la tranche en cours (si pause active)."""
+        total = ride.total_pause_seconds or 0
+        if ride.pause_started_at:
+            total += int((timezone.now() - ride.pause_started_at).total_seconds())
+        return total
+    
+    def _compute_pause_fee(total_seconds: int) -> int:
+        free = getattr(settings, "PAUSE_FREE_SECONDS", 300)
+        rate = int(getattr(settings, "PAUSE_RATE_PER_MIN", 250))
+        extra = max(0, total_seconds - free)
+        mins = ceil(extra / 60) if extra > 0 else 0
+        return mins * rate  # XAF int
+
     def get_serializer_class(self):
         return RideCreateSerializer if self.action in ("create", "create_alias") else RideSerializer
 
@@ -129,12 +166,47 @@ class RideViewSet(viewsets.ModelViewSet):
         }
         if ride.driver_id:
             d = ride.driver
+            vehicle = RideVehicle.objects.filter(driver=d).order_by("id").first()
+            brand = getattr(vehicle, "brand", None) if vehicle else None
+            model = getattr(vehicle, "model", None) if vehicle else None
+            plate = None
+            if vehicle:
+                plate = (
+                    getattr(vehicle, "plate", None)
+                    or getattr(vehicle, "vehicle_plate", None)
+                )
+            color = getattr(vehicle, "color", None) if vehicle else None
+            category = getattr(vehicle, "category", None) if vehicle else None
+            stats = DriverStats.objects.filter(driver_id=ride.driver_id).first()
+            rating_avg = getattr(stats, "rating_avg", None) if stats else None
+            rides_done = getattr(stats, "rating_count", None) if stats else None
+
             data["driver"] = {
                 "id": ride.driver_id,
                 "email": getattr(d, "email", None),
                 "first_name": getattr(d, "first_name", None),
                 "last_name": getattr(d, "last_name", None),
+                "phone": getattr(d, "phone_number", None),
+
+                "brand": brand,
+                "model": model,
+                "plate": plate,
+                "color": color,
+                "category": category,
+                "rating_avg": rating_avg,
+                "rides_done": rides_done,
             }
+        
+        data["pause"] = {
+            "active": bool(ride.pause_started_at),
+            "started_at": ride.pause_started_at.isoformat() if ride.pause_started_at else None,
+            "total_pause_s": _pause_seconds_now(ride),
+            "free_seconds": getattr(settings, "PAUSE_FREE_SECONDS", 300),
+            "rate_per_min": int(getattr(settings, "PAUSE_RATE_PER_MIN", 250)),
+            "fee_so_far": _compute_pause_fee(_pause_seconds_now(ride)),
+        }
+        data["final_price"] = str(getattr(ride, "final_price", "") or "")
+        data["pause_fee"] = int(getattr(ride, "pause_fee", 0) or 0)
         return Response(data, status=status.HTTP_200_OK)
 
     # ───────────────────────────────────────────────────────────
@@ -274,6 +346,7 @@ class RideViewSet(viewsets.ModelViewSet):
                     "driver": {
                         "id": ride.driver_id,
                         "email": getattr(ride.driver, "email", None),
+                        "phone_number": getattr(ride.driver, "phone_number", None),
                     },
                     "ride": {
                         "id": ride.id,
@@ -320,6 +393,78 @@ class RideViewSet(viewsets.ModelViewSet):
                 logger.exception("WS emit (accept) failed")
 
         return Response({"ok": True})
+    
+    # ───────────────────────────────────────────────────────────
+    # PAUSE: Client en pause + calcul du tarif
+    # ───────────────────────────────────────────────────────────
+    @action(detail=True, methods=["post"], url_path="pause/start")
+    def pause_start(self, request, pk=None):
+        ride = get_object_or_404(Ride, pk=pk)
+        if not (request.user.is_staff or ride.driver_id == request.user.id):
+            return Response({"detail": "Forbidden"}, status=403)
+        if ride.status not in {"accepted", "in_progress"}:
+            return Response({"detail": f"Cannot pause in status {ride.status}"}, status=409)
+        
+        if ride.pause_started_at:
+            total = _pause_seconds_now(ride)
+            fee = _compute_pause_fee(total)
+            return Response({"ok": True, "pause_active": True,
+                             "total_pause_s": total, "pause_fee": fee}, status=200)
+        ride.pause_started_at = timezone.now()
+        ride.save(update_fields=["pause_started_at"])
+
+        if channel_layer:
+            payload = {
+                "requestId": ride.id,
+                "at": ride.pause_started_at.isoformat(),
+                "freeRemaining": max(0, getattr(settings,"PAUSE_FREE_SECONDS",300) - (ride.total_pause_seconds or 0)),
+            }
+            for g in {user_room(ride.user_id), f"user.{ride.user_id}", driver_room(ride.driver_id)}:
+                async_to_sync(channel_layer.group_send)(g, {"type":"evt","event":"ride.pause.started","payload":payload})
+            
+        return Response({"ok": True, "pause_active": True, "total_pause_s": ride.total_pause_seconds, "pause_fee": int(ride.pause_fee)}, status=200)
+    
+    @action(detail=True, methods=["post"], url_path="pause/stop")
+    def pause_stop(self, request, pk=None):
+        ride = get_object_or_404(Ride, pk=pk)
+        if not (request.user.is_staff or ride.driver_id == request.user.id):
+            return Response({"detail": "Forbidden"}, status=403)
+        
+        if not ride.pause_started_at:
+            total = _pause_seconds_now(ride)
+            fee = _compute_pause_fee(total)
+            return Response({"ok": True, "pause_active": False, "total_pause_s": total, "pause_fee": fee}, status=200)
+        
+        # accumuler la tranche courante
+        now = timezone.now()
+        delta = int((now - ride.pause_started_at).total_seconds())
+        ride.total_pause_seconds = (ride.total_pause_seconds or 0) + max(0, delta)
+        ride.pause_started_at = None
+
+        # recalculer le tarif de pause
+        fee_int = _compute_pause_fee(ride.total_pause_seconds)
+        ride.pause_fee = Decimal(fee_int)
+
+        base = Decimal(ride.price or 0)
+        ride.final_price = base + ride.pause_fee
+
+        ride.save(update_fields=["total_pause_seconds", "pause_started_at", "pause_fee", "final_price"])
+
+        if channel_layer:
+            payload = {
+                "requestId": ride.id,
+                "total_pause_s": ride.total_pause_seconds,
+                "pause_fee": int(ride.pause_fee),
+                "final_price": str(ride.final_price or base),
+            }
+            for g in {user_room(ride.user_id), f"user.{ride.user_id}", driver_room(ride.driver_id)}:
+                async_to_sync(channel_layer.group_send)(g, {"type":"evt","event":"ride.pause.stopped","payload":payload})
+                async_to_sync(channel_layer.group_send)(g, {"type":"evt","event":"ride.fare.updated","payload":payload})
+
+        return Response({"ok": True, "pause_active": False,
+                         "total_pause_s": ride.total_pause_seconds,
+                         "pause_fee": int(ride.pause_fee),
+                         "final_price": str(ride.final_price)}, status=200)
 
     # ───────────────────────────────────────────────────────────
     # CANCEL → status + push à client & chauffeur
@@ -348,18 +493,32 @@ class RideViewSet(viewsets.ModelViewSet):
             try:
                 payload = {"requestId": ride.id}
                 # Client (toujours)
+                client_group = user_room(ride.user_id)
+
+                driver_groups = set()
+                if ride.driver_id:
+                    driver_groups.add(driver_room(ride.driver_id))
+
+                    d = getattr(ride, "driver", None)
+                    driver_ws_id = getattr(d, "user_id", None)
+                    if driver_ws_id:
+                        driver_groups.add(f"user.{driver_ws_id}")
+
                 async_to_sync(channel_layer.group_send)(
-                    user_room(ride.user_id),
+                    client_group,
                     {"type": "evt", "event": "ride.cancelled", "payload": payload},
                 )
-                # Chauffeur si assigné
-                if ride.driver_id:
+                for g in driver_groups:
                     async_to_sync(channel_layer.group_send)(
-                        driver_room(ride.driver_id),
+                        g,
                         {"type": "evt", "event": "ride.cancelled", "payload": payload},
                     )
-                logger.info("[WS] cancel: notified user.%s & driver.%s ride_id=%s",
-                            ride.user_id, ride.driver_id, ride.id)
+                logger.info(
+                    "[WS] cancel: notified user.%s & driver.%s ride_id=%s",
+                    ride.user_id,
+                    list(driver_groups),
+                    ride.id,
+                )
             except Exception as e:
                 logger.exception("WS emit (cancel) failed: %s", e)
 
@@ -411,6 +570,26 @@ class RideViewSet(viewsets.ModelViewSet):
         ride = get_object_or_404(Ride, pk=pk)
         if ride.driver_id != request.user.id:
             return Response({"detail": "Forbidden"}, status=403)
+
+        if ride.status not in {"accepted", "in_progress"}:
+            return Response({"detail": f"Cannot start from status '{ride.status}'"}, status=409)
+        if ride.status == "in_progress":
+            ch = get_channel_layer()
+            if ch:
+                payload = {
+                    "requestId": ride.id,
+                    "driver": {
+                        "id": ride.driver_id,
+                        "phone_number": getattr(ride.driver, "phone_number", None),
+                    },
+                    "at": timezone.now().isoformat(),
+                    "stopCountdown": True,  # hint explicite pour le front
+                }
+                for g in {user_room(ride.user_id), f"user.{ride.user_id}"}:
+                    async_to_sync(ch.group_send)(g, {"type": "evt", "event": "ride.started", "payload": payload})
+                    async_to_sync(ch.group_send)(g, {"type": "ride.started", "requestId": ride.id, "driverId": ride.driver_id})
+            return Response({"ok": True, "status": "in_progress"})
+        
         ride.status = "in_progress"
         update_fields = ["status"]
         if hasattr(ride, "started_at") and not ride.started_at:
@@ -424,8 +603,12 @@ class RideViewSet(viewsets.ModelViewSet):
             groups = {user_room(ride.user_id), f"user.{ride.user_id}"}
             payload = {
                 "requestId": ride.id,
-                "driver": {"id": ride.driver_id},
+                "driver": {
+                    "id": ride.driver_id,
+                    "phone_number": getattr(ride.driver, "phone_number", None),
+                },
                 "at": timezone.now().isoformat(),
+                "stopCountdown": True,
             }
             for g in groups:
                 # format générique
@@ -440,22 +623,70 @@ class RideViewSet(viewsets.ModelViewSet):
                     "requestId": ride.id,
                     "driverId": ride.driver_id,
                 })
-        return Response({"ok": True})
+        return Response({"ok": True, "status": "in_progress"})
 
     @action(detail=True, methods=["post"], url_path="finish")
     def finish(self, request, pk=None):
         ride = get_object_or_404(Ride, pk=pk)
-        if ride.driver_id != request.user.id:
+        if not (request.user.is_staff or ride.driver_id == request.user.id):
             return Response({"detail": "Forbidden"}, status=403)
+        
+        if ride.pause_started_at:
+            delta = int((timezone.now() - ride.pause_started_at).total_seconds())
+            ride.total_pause_seconds = (ride.total_pause_seconds or 0) + max(0, delta)
+            ride.pause_started_at = None
+
+        total_pause_s = _pause_seconds_now(ride)  # (= cumulé désormais)
+        fee_int = _compute_pause_fee(total_pause_s)
+        ride.pause_fee = Decimal(fee_int)
+        base = Decimal(ride.price or 0)
+        ride.final_price = base + ride.pause_fee
+
         ride.status = "completed"
         ride.completed_at = timezone.now()
-        ride.save(update_fields=["status", "completed_at"])
+        ride.save(update_fields=[
+            "status", "completed_at",
+            "pause_started_at", "total_pause_seconds",
+            "pause_fee", "final_price"
+        ])
+
+        if not _has_success_payment(ride):
+            Payment.objects.get_or_create(
+                idempotency_key=f"cash-{ride.id}",
+                defaults=dict(
+                    ride=ride,
+                    amount=ride.final_price,
+                    currency="XAF",
+                    wallet="CASH",
+                    provider="CASH",
+                    status="SUCCESS",
+                    meta={"source": "finish_auto_cash"},
+                )
+            )
         if channel_layer:
+            payload = {
+                "requestId": ride.id,
+                "final_price": str(ride.final_price),
+                "base_price": str(base),
+                "pause_fee": int(ride.pause_fee),
+                "total_pause_s": total_pause_s,
+            }
             async_to_sync(channel_layer.group_send)(
                 user_room(ride.user_id),
-                {"type": "evt", "event": "ride.finished", "payload": {"requestId": ride.id}},
+                {"type": "evt", "event": "ride.finished", "payload": payload},
             )
-        return Response({"ok": True})
+            if ride.driver_id:
+                async_to_sync(channel_layer.group_send)(
+                    driver_room(ride.driver_id),
+                    {"type": "evt", "event": "ride.finished", "payload": payload},
+                )
+        return Response({
+            "ok": True,
+            "final_price": str(ride.final_price),
+            "base_price": str(base),
+            "pause_fee": int(ride.pause_fee),
+            "total_pause_s": total_pause_s,
+        })
     
     @action(detail=True, methods=["get"], url_path="contact")
     def contact(self, request, pk=None):
@@ -466,15 +697,42 @@ class RideViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
         # retourne des infos basiques de contact du client
-        user = getattr(ride, "user", None)
+        user = getattr(ride, "user", None) 
+        phone = None
+        email = None
+        first_name = None
+        last_name = None
+
+        if user:
+            first_name = getattr(user, "first_name", None)
+            last_name = getattr(user, "last_name", None)
+            phone = (
+                getattr(user, "phone_number", None)
+                or getattr(user, "phone", None)
+            )
+            email = getattr(user, "email", None)
+            if not phone:
+                try:
+                    profile = CustomerProfile.objects.filter(user=user).first()
+                except Exception:
+                    profile = None
+                if profile:
+                    phone = (
+                        getattr(profile, "phone_number", None)
+                        or getattr(profile, "phone", None)
+                    )
+                    if not first_name:
+                        first_name = getattr(profile, "first_name", None) or getattr(profile, "name", None)
+                    if not last_name:
+                        last_name = getattr(profile, "last_name", None)
         payload = {
             "requestId": ride.id,
             "customer": {
                 "id": getattr(user, "id", None),
-                "first_name": getattr(user, "first_name", None),
-                "last_name": getattr(user, "last_name", None),
-                "phone": getattr(user, "phone", None),   # adapte au nom de champ réel
-                "email": getattr(user, "email", None),
+                "first_name": first_name,
+                "last_name": last_name,
+                "phone_number": phone,   # adapte au nom de champ réel
+                "email": email,
             }
         }
         return Response(payload, status=200)
@@ -525,6 +783,76 @@ class RideViewSet(viewsets.ModelViewSet):
         stats.save(update_fields=['rating_count', 'rating_avg'])
 
         return Response({'ok': True, 'rating': stars, 'rating_avg': round(new_avg, 2)}, status=200)
+    
+    def _driver_is_offline(self, driver_id: int, timeout_s: int = 30) -> bool:
+        pres = DriverPresence.objects.filter(driver_id=driver_id).first()
+        if not pres:
+            return True
+        if not pres.is_online:
+            return True
+        if not pres.last_seen:
+            return True
+        return (timezone.now() - pres.last_seen).total_seconds() > timeout_s
+    
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="force-complete",
+        permission_classes=[permissions.IsAdminUser],
+    )
+    def force_complete(self, request, pk=None):
+        """
+        Termine une course en cours si le chauffeur est hors-ligne (fail-safe).
+        Idempotent: si déjà terminée/annulée → 200 sans effet.
+        """
+        timeout_s = int(request.data.get("offline_timeout_s", 30))
+        with transaction.atomic():
+            try:
+                ride = Ride.objects.select_for_update().get(pk=pk)
+            except Ride.DoesNotExist:
+                return Response({'detail': 'Not found.'}, status=404)
+            if ride.status in {"completed", "finished", "cancelled"}:
+                return Response({"detail": f"Ride already {ride.status}"}, status=200)
+
+            if not ride.driver_id:
+                # pas de chauffeur → on peut terminer (ou annuler) selon ta logique
+                ride.status = "completed"
+                ride.completed_at = timezone.now()
+                ride.save(update_fields=["status", "completed_at"])
+                return Response({"detail": "Ride completed (no driver assigned)"}, status=200)
+            
+            if not self._driver_is_offline(ride.driver_id, timeout_s=timeout_s):
+                return Response(
+                    {"detail": "Driver seems online; refuse fail-safe"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            # OK, chauffeur offline → on clôture proprement
+            if ride.status in ("pending", "accepted"):
+                ride.status = "completed"
+            elif ride.status == "in_progress":
+                ride.status = "completed"
+            else:
+                ride.status = "completed"
+
+            ride.completed_at = timezone.now()
+            ride.save(update_fields=["status", "completed_at"])
+
+        try:
+            from channels.layers import get_channel_layer
+            from asgiref.sync import async_to_sync
+            ch = get_channel_layer()
+            async_to_sync(ch.group_send)(
+                f"user.{ride.user_id}",
+                {
+                    "type": "evt",
+                    "event": "ride.completed",
+                    "payload": {"rideId": ride.id, "reason": "system_fail_safe"},
+                },
+            )
+        except Exception:
+            pass
+
+        return Response({"detail": "Ride force-completed", "ride_id": ride.id}, status=200)
 
 
 
@@ -552,6 +880,9 @@ class RideDetailView(APIView):
             "status": r.status,
             "category": getattr(r, "category", "eco"),
             "price": str(getattr(r, "price", "")),
+            "final_price": str(getattr(r, "final_price", "") or ""),
+            "pause_fee": int(getattr(r, "pause_fee", 0) or 0),
+            "total_pause_s": int(getattr(r, "total_pause_seconds", 0) or 0),
             "pickup": {
                 "label": getattr(r, "pickup_location", None),
                 "lat": getattr(r, "pickup_lat", None),
@@ -860,3 +1191,70 @@ class DriverVehicleMe(APIView):
         ser.is_valid(raise_exception=True)
         ser.save(driver=request.user)  # force le driver au cas où
         return Response(DriverVehicleMeSerializer(v).data, status=200)
+    
+class DriverNavEventViewSet(mixins.CreateModelMixin,
+                            mixins.ListModelMixin,
+                            mixins.RetrieveModelMixin,
+                            viewsets.GenericViewSet):
+    queryset = DriverNavEvent.objects.select_related("driver").all()
+    serializer_class = DriverNavEventSerializer
+    permission_classes = [IsAuthenticated & IsDriverOrStaff]
+
+    def perform_create(self, serializer):
+        serializer.save(driver=self.request.user)
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        rid   = self.request.query_params.get("request_id")
+        etype = self.request.query_params.get("event_type")
+        since = self.request.query_params.get("since")  # ISO date/time
+        driver_id = self.request.query_params.get("driver")
+
+        if rid: qs = qs.filter(request_id=rid)
+        if etype: qs = qs.filter(event_type=etype)
+        if since: qs = qs.filter(created_at__gte=since)
+        if driver_id: qs = qs.filter(driver_id=driver_id)
+
+        u = self.request.user
+        if not getattr(u, "is_staff", False):
+            qs = qs.filter(driver=u)
+        return qs
+
+    @action(detail=False, methods=["post"])
+    def bulk(self, request):
+        events = request.data.get("events", [])
+        if not isinstance(events, list):
+            return Response({"detail": "events must be a list"}, status=400)
+
+        created = []
+        for data in events:
+            ser = self.get_serializer(data=data)
+            if ser.is_valid():
+                created.append(DriverNavEvent(driver=request.user, **ser.validated_data))
+        if created:
+            DriverNavEvent.objects.bulk_create(created, batch_size=500)
+        return Response({"created": len(created)}, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["get"])
+    def metrics(self, request):
+        """
+        GET /api/ridevtc/driver-nav/events/metrics/?since=2025-10-01&driver=123&request_id=456
+        Renvoie: compte par type, total, série horaire.
+        """
+        qs = self.get_queryset()
+        # Agrégats
+        by_type = qs.values("event_type").annotate(n=Count("id")).order_by("-n")
+        total = qs.count()
+        # Série horaire (events/h)
+        per_hour = (
+            qs.annotate(h=TruncHour("created_at"))
+              .values("h")
+              .annotate(n=Count("id"))
+              .order_by("h")
+        )
+
+        return Response({
+            "total": total,
+            "by_type": list(by_type),
+            "per_hour": [{"hour": row["h"], "count": row["n"]} for row in per_hour],
+        })

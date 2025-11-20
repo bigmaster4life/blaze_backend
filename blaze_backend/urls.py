@@ -21,17 +21,18 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from django.conf import settings
 from django.conf.urls.static import static
 
-from RideVTC.views import RideDetailView, RideViewSet, RideVehicleViewSet, DriverRideLocationView
+from RideVTC.views import RideDetailView, RideViewSet, RideVehicleViewSet, DriverRideLocationView, DriverNavEventViewSet
 from rest_framework.routers import DefaultRouter
 from vehicles.views import VehicleViewSet, RentalPromoView
 from .health import healthz, readyz, healthz_full
 from analytics.views import AnalyticsViewSet
+from drivers.views import DriverDocsMeView, DriverEarningsSummary
+from notifications.views import RegisterDeviceView
 
 router = DefaultRouter()
 router.register(r'vehicles', VehicleViewSet, basename='vehicles')
-router.register(r'rides', RideViewSet, basename='rides')
-router.register(r'ride-vehicles', RideVehicleViewSet, basename='ride-vehicles')
 router.register(r'admin/analytics', AnalyticsViewSet, basename='admin-analytics')
+router.register(r"ridevtc/driver-nav/events", DriverNavEventViewSet, basename="ridevtc-driver-nav-events")
 
 # ✅ route explicite vers l’action `location` du ViewSet
 ride_location = RideViewSet.as_view({'post': 'location'})
@@ -43,6 +44,8 @@ urlpatterns = [
     re_path(r"^api/healthz/?$", healthz, name="api-healthz"),
     re_path(r"^api/readyz/?$", readyz, name="api-readyz"),
     re_path(r"^api/healthz/full/?$", healthz_full),
+    re_path(r"^api/driver/docs/?$", DriverDocsMeView.as_view()),
+    re_path(r"^api/driver/earnings/summary/?$", DriverEarningsSummary.as_view()),
 
     path('admin/', admin.site.urls),
 
@@ -59,6 +62,7 @@ urlpatterns = [
     path('api/rides/<int:pk>/location/', ride_location, name='ride-location'),
 
     path('api/', include('RideVTC.urls')),
+    path("api/notifications/", include("notifications.urls")),
 
     # (facultatif) tu peux garder aussi ta route “drivers location” si tu veux
     # path('api/drivers/rides/<int:pk>/location/', DriverRideLocationView.as_view(), name='driver-ride-location'),

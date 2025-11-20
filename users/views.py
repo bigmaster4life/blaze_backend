@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.decorators import action
 from .serializers import (
-    RegisterSerializer, UserSerializer, CustomerProfileSerializer, PhoneLoginSerializer
+    RegisterSerializer, UserSerializer, CustomerProfileSerializer, PhoneLoginSerializer, PhoneOTPRequestSerializer, PhoneOTPVerifySerializer
 )
 from rest_framework import status, viewsets, permissions
 from .models import CustomUser, CustomerProfile
@@ -13,6 +13,9 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.generics import ListAPIView
 from django.shortcuts import get_object_or_404
 from rest_framework.parsers import MultiPartParser, FormParser
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+from drivers.models import Driver
 
 class IsOwnerProfile(permissions.BasePermission):
     def has_object_permission(self, request, view, obj):
@@ -36,23 +39,86 @@ class MeView(APIView):
         return Response(serializer.data)
 
 class LoginView(APIView):
+    """
+    Login email + mot de passe (peut servir pour admin / backoffice).
+    Réponse alignée avec le format mobile:
+
+    {
+      "access": "...",
+      "refresh": "...",
+      "user": {
+        "id": ...,
+        "phone_number": "...",
+        "email": "...",
+        "userType": "driver" | "customer",
+        "full_name": "..."
+      },
+      "driver_profile": {
+        "id": ...,
+        "category": "...",
+        "vehicle_plate": "..."
+      }  # seulement si c'est un chauffeur
+    }
+    """
+    permission_classes = [AllowAny]
+
     def post(self, request):
         email = request.data.get('email')
         password = request.data.get('password')
 
-        user = authenticate(request, email=email, password=password)
-        if user is not None:
-            refresh = RefreshToken.for_user(user)
+        if not email or not password:
+            return Response(
+                {"detail": "email and password required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-            return Response({
-                'token': str(refresh.access_token),
-                'refresh': str(refresh),
-                'user_type': user.user_type,
-                'email': user.email,
-                'full_name': user.full_name,
-            })
+        user = authenticate(request, email=email, password=password)
+        if user is None:
+            return Response(
+                {'detail': 'Identifiants invalides'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        # JWT
+        refresh = RefreshToken.for_user(user)
+        access_token = str(refresh.access_token)
+
+        # userType: on mappe ton champ user_type -> "driver" | "customer"
+        raw_type = getattr(user, "user_type", None) or getattr(user, "userType", None)
+        raw_type = (raw_type or "").lower()
+        if raw_type in ("driver", "chauffeur"):
+            user_type = "driver"
+        elif raw_type in ("customer", "client"):
+            user_type = "customer"
         else:
-            return Response({'error': 'Identifiants invalides'}, status=status.HTTP_401_UNAUTHORIZED)
+            # fallback : si un profil driver existe, alors "driver"
+            user_type = "driver" if Driver.objects.filter(user=user).exists() else "customer"
+
+        # Profil chauffeur, si existant
+        driver_profile = Driver.objects.filter(user=user).first()
+
+        data = {
+            "access": access_token,
+            "refresh": str(refresh),
+            "user": {
+                "id": user.id,
+                "phone_number": getattr(user, "phone_number", "") or "",
+                "email": user.email or "",
+                "userType": user_type,
+                "full_name": getattr(user, "full_name", "") or (
+                    f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
+                ),
+            },
+        }
+
+        if driver_profile:
+            data["driver_profile"] = {
+                "id": driver_profile.id,
+                "category": getattr(driver_profile, "category", None),
+                "vehicle_plate": getattr(driver_profile, "vehicle_plate", None),
+            }
+
+        return Response(data, status=status.HTTP_200_OK)
 
 class UserListView(ListAPIView):
     queryset = CustomUser.objects.all()
@@ -106,3 +172,61 @@ class PhoneLoginView(APIView):
         ser.is_valid(raise_exception=True)
         data = ser.save()  # retourne tokens + user
         return Response(data, status=status.HTTP_200_OK)
+
+class RequestOTPView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        ser = PhoneOTPRequestSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        data = ser.save()  # {"phone_number": "...", "otp": "..."} si DEBUG; "SENT" sinon
+        return Response({"message": "OTP envoyé", **data}, status=status.HTTP_200_OK)
+
+
+class VerifyOTPView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        ser = PhoneOTPVerifySerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        data = ser.save()  # tokens + user + is_new_user
+        return Response(data, status=status.HTTP_200_OK)
+    
+class SetPasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """
+        Définit (ou change) le mot de passe.
+        - Si l'utilisateur n'a jamais eu de mot de passe -> pas besoin de 'old_password'.
+        - Sinon, 'old_password' requis et doit matcher.
+        Body:
+        {
+          "new_password": "...",
+          "confirm_password": "...",
+          "old_password": ""  # optionnel si aucun mot de passe existant
+        }
+        """
+        user = request.user
+        new_password = (request.data.get("new_password") or "").strip()
+        confirm_password = (request.data.get("confirm_password") or "").strip()
+        current_password = request.data.get("current_password", "")
+
+        if not new_password or not confirm_password:
+            return Response({"detail": "Nouveau mot de passe requis."}, status=400)
+        if new_password != confirm_password:
+            return Response({"detail": "La confirmation ne correspond pas."}, status=400)
+        
+        no_real_password = (not user.has_usable_password()) or (not (user.password or "").strip())
+
+        # S'il a déjà un pwd, on exige l'ancien
+        if not no_real_password:
+            if not current_password:
+                return Response({"detail": "Ancien mot de passe requis."}, status=400)
+            if not user.check_password(current_password):
+                return Response({"detail": "Ancien mot de passe invalide."}, status=401)
+
+
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
+        return Response({"ok": True, "must_change_password": False}, status=200)
