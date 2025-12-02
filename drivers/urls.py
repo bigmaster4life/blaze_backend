@@ -1,6 +1,7 @@
 # drivers/urls.py
 from django.urls import path
 from drivers.views import DriverListCreateView, DriverDetailView, InviteDriverView, DriverStatusView, CompleteOnboardingView, DriverPresenceView, MockRideRequestView, resend_invite, DriverLoginView, DriverDocsMeView, DriverEarningsSummary, DriverChangePasswordView
+from .views import driver_block_toggle
 
 urlpatterns = [
     path('', DriverListCreateView.as_view(), name='driver-list'),
@@ -15,4 +16,5 @@ urlpatterns = [
     path('login/', DriverLoginView.as_view(), name='driver-login'),
     path('docs/', DriverDocsMeView.as_view(), name='driver-docs-me'),
     path('earnings/summary/', DriverEarningsSummary.as_view(), name='driver-earnings-summary'),
+    path("drivers/<int:pk>/block/", driver_block_toggle, name="driver-block-toggle"),
 ]

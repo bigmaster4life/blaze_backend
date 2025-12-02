@@ -116,6 +116,7 @@ class Rental(models.Model):
 
     # pour les réservations en "pending" (option/hold)
     hold_expires_at = models.DateTimeField(null=True, blank=True)
+    is_cash = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -165,6 +166,30 @@ class Rental(models.Model):
         self.save(update_fields=[
             "status",
             "payment_method",
+            "identification_code",
+            "total_amount",
+        ])
+        set_vehicle_availability(self.vehicle)
+
+    def mark_paid_cash(self):
+        """
+        Paiement manuel en espèces.
+        Passe la location en 'confirmed' et marque payment_method = 'cash'.
+        """
+        if not self.total_amount or str(self.total_amount) == "0":
+            self.recompute_total()
+        self.payment_method = "cash"
+        self.is_cash = True
+
+        if self.status in ("pending", "expired"):
+            self.status = "confirmed"
+
+        if not self.identification_code:
+            self.identification_code = generate_ident_code()
+        self.save(update_fields=[
+            "status",
+            "payment_method",
+            "is_cash",
             "identification_code",
             "total_amount",
         ])

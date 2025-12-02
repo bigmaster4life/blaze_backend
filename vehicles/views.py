@@ -65,8 +65,12 @@ class VehicleViewSet(viewsets.ModelViewSet):
         return ctx
 
     def perform_create(self, serializer):
+        user = self.request.user
         # attribue automatiquement le propriétaire connecté
-        serializer.save(owner=self.request.user)
+        serializer.save(
+            owner=user,
+            owner_phone=getattr(user, "phone_number", "") or getattr(user, "email", "")
+        )
 
 class RentalPromoView(APIView):
     permission_classes = [AllowAny]
@@ -206,6 +210,12 @@ class RentalViewSet(viewsets.ModelViewSet):
         r.save(update_fields=['end_date', 'payment_method'])
         set_vehicle_availability(r.vehicle)
         return Response({'ok': True, 'status': r.status, 'end_date': r.end_date})
+    
+    @action(detail=True, methods=["patch"], url_path="set_cash_payment")
+    def set_cash_payment(self, request, pk=None):
+        rental = self.get_object()
+        rental.mark_paid_cash()
+        return Response({"message": "Paiement cash confirmé."}, status=status.HTTP_200_OK)
     
 class RentalMobileInitiate(APIView):
     """

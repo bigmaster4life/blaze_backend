@@ -16,7 +16,16 @@ class VehicleSerializer(serializers.ModelSerializer):
         user = obj.owner
         if not user:
             return obj.owner_phone or None
-        return getattr(user, 'phone', None) or getattr(getattr(user, 'profile', None), 'phone', None) or obj.owner_phone or None
+        
+        phone = getattr(user, 'phone_number', None)
+        if phone:
+            return phone
+        
+        profile = getattr(user, 'profile', None)
+        phone2 = getattr(profile, 'phone', None)
+        if phone2:
+            return phone2
+        return obj.owner_phone or None
     
     def get_owner_name(self, obj):
         user = obj.owner
@@ -60,13 +69,37 @@ class PromoSerializer(serializers.ModelSerializer):
         return None
     
 class RentalSerializer(serializers.ModelSerializer):
+    customer_phone = serializers.SerializerMethodField()
+    customer_name = serializers.SerializerMethodField()
     class Meta:
         model = Rental
         fields = [
             'id', 'vehicle', 'user', 'start_date', 'end_date', 'status',
-            'payment_method', 'total_amount', 'hold_expires_at', 'created_at', 'identification_code'
+            'payment_method', 'total_amount', 'hold_expires_at', 'created_at', 'identification_code',
+            'customer_phone', 'customer_name',
         ]
-        read_only_fields = ['status', 'hold_expires_at', 'created_at', 'user', 'identification_code']
+        read_only_fields = ['status', 'hold_expires_at', 'created_at', 'user', 'identification_code', 'customer_phone', 'customer_name']
+    
+    def get_customer_phone(self, obj):
+        u = getattr(obj, "user", None)
+        if not u:
+            return None
+        phone = getattr(u, "phone_number", None)
+        if phone:
+            return phone
+        return getattr(u, "phone", None)
+    
+    def get_customer_name(self, obj):
+        u = getattr(obj, "user", None)
+        if not u:
+            return None
+        full = getattr(u, "get_full_name", None)
+        if callable(full):
+            name = full().strip()
+            if name:
+                return name
+        name = f"{getattr(u, 'first_name', '')} {getattr(u, 'last_name', '')}".strip()
+        return name or u.email
 
     def validate(self, attrs):
         """

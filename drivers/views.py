@@ -104,6 +104,20 @@ class DriverDetailView(APIView):
 
         serializer = DriverSerializer(driver)
         return Response(serializer.data)
+    
+    def patch(self, request, pk):
+        driver = get_object_or_404(Driver, pk=pk)
+        self.check_object_permissions(request, driver)
+        is_blocked = request.data.get("is_blocked", None)
+        block_reason = request.data.get("block_reason", "")
+
+        if is_blocked is not None:
+            driver.is_blocked = bool(is_blocked)
+        if block_reason is not None:
+            driver.block_reason = block_reason
+        
+        driver.save()
+        return Response(DriverSerializer(driver).data, status=status.HTTP_200_OK)
 
     def delete(self, request, pk):
         driver = get_object_or_404(Driver, pk=pk)
@@ -585,6 +599,18 @@ class DriverLoginView(APIView):
         if not user.is_active:
             return Response({"detail": "Compte inactif."}, status=status.HTTP_403_FORBIDDEN)
 
+        # 2bis) Vérifier le statut du chauffeur (blocage)
+        try:
+            driver = user.driver_profile
+        except Driver.DoesNotExist:
+            return Response({"detail": "Aucun profil chauffeur associé."}, status=status.HTTP_403_FORBIDDEN)
+
+        if driver.is_blocked:
+            msg = "Compte chauffeur bloqué."
+            if driver.block_reason:
+                msg += f" Motif : {driver.block_reason}"
+            return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+
         # 3) On s’assure que le type est bien chauffeur/driver
         #    (build_auth_payload convertira "chauffeur" -> "driver")
         if getattr(user, "user_type", None) not in ("chauffeur", "driver"):
@@ -685,3 +711,70 @@ class DriverChangePasswordView(APIView):
             driver.save(update_fields=["must_reset_password"])
 
         return Response({"detail": "Mot de passe modifié."}, status=200)
+    
+class DriverBlockView(APIView):
+    """
+    PATCH /api/drivers/<pk>/block/
+    Body: { "is_blocked": true/false, "block_reason": "..." (optionnel) }
+
+    - is_blocked=true  -> on bloque + désactive le user
+    - is_blocked=false -> on débloque + réactive le user
+    """
+    permission_classes = [IsAdminUser]
+
+    def patch(self, request, pk):
+        driver = get_object_or_404(Driver.objects.select_related("user"), pk=pk)
+        is_blocked = bool(request.data.get("is_blocked", True))
+        reason = (request.data.get("block_reason") or "").strip()
+
+        driver.is_blocked = is_blocked
+        if is_blocked:
+            driver.block_reason = reason or "Compte chauffeur bloqué par l'administration."
+        else:
+            driver.block_reason = ""
+
+        driver.save(update_fields=["is_blocked", "block_reason"])
+
+        # on aligne l'utilisateur lié
+        user = driver.user
+        if user:
+            user.is_active = not is_blocked
+            user.save(update_fields=["is_active"])
+
+        return Response(
+            {
+                "detail": "Chauffeur bloqué." if is_blocked else "Chauffeur débloqué.",
+                "is_blocked": driver.is_blocked,
+                "block_reason": driver.block_reason,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+@api_view(["PATCH"])
+@permission_classes([IsAdminUser])
+def driver_block_toggle(request, pk: int):
+    """
+    PATCH /api/drivers/<pk>/block/
+    Body: { "is_blocked": true|false, "block_reason"?: "..." }
+    """
+    driver = get_object_or_404(Driver.objects.select_related("user"), pk=pk)
+
+    is_blocked = request.data.get("is_blocked", None)
+    if is_blocked is None:
+        return Response({"detail": "Le champ 'is_blocked' est requis."}, status=400)
+
+    is_blocked = bool(is_blocked)
+    reason = (request.data.get("block_reason") or "").strip()
+
+    driver.is_blocked = is_blocked
+    driver.block_reason = reason if is_blocked else ""
+    driver.save(update_fields=["is_blocked", "block_reason"])
+
+    return Response(
+        {
+            "detail": "Statut chauffeur mis à jour.",
+            "is_blocked": driver.is_blocked,
+            "block_reason": driver.block_reason,
+        },
+        status=200,
+    )

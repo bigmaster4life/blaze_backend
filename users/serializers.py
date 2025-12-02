@@ -167,6 +167,52 @@ class PhoneLoginSerializer(serializers.Serializer):
         from .serializers import build_auth_payload  # import interne
         user = validated_data["user"]
         return build_auth_payload(user)
+    
+def send_sms(phone: str, message: str) -> None:
+    """
+    Envoi d'un SMS.
+    Par défaut : mode DEBUG → print dans la console.
+    En production : décommenter l'appel API Airtel.
+    """
+
+    # --------------------------------------------------------
+    # 🔵 MODE DEBUG (actuel)
+    # --------------------------------------------------------
+    print(f"[SMS DEBUG] To={phone} :: {message}")
+
+    # --------------------------------------------------------
+    # 🔴 MODE PRODUCTION – API AIRTEL (COMMENTÉ POUR L'INSTANT)
+    # --------------------------------------------------------
+    """
+    try:
+        url = "https://api.airtel.com/.../sms"   # URL fournie par Airtel
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            # "X-API-Key": settings.AIRTEL_API_KEY,        # clé API Airtel
+            # "Authorization": f"Bearer {settings.AIRTEL_TOKEN}", 
+        }
+
+        payload = {
+            "sender": "BLAZE",                     # ou shortcode Airtel
+            "recipient": phone,                    # 241XXXXXXXX
+            "message": message
+        }
+
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+
+        # Log si Airtel retourne une erreur
+        if response.status_code >= 400:
+            print("[AIRTEL SMS ERROR]", response.status_code, response.text)
+
+    except Exception as e:
+        print("[AIRTEL SMS EXCEPTION]", str(e))
+    """
+    # --------------------------------------------------------
+    # 🟢 FIN
+    # --------------------------------------------------------
+
 
 class PhoneOTPRequestSerializer(serializers.Serializer):
     phone_number = serializers.CharField()
@@ -179,8 +225,15 @@ class PhoneOTPRequestSerializer(serializers.Serializer):
 
     def create(self, validated_data):
         phone = validated_data["phone_number"]
-        otp = "123456"  # préprod
+
+        otp = f"{random.randint(0, 999999):06d}"
         cache.set(f"otp:{phone}", otp, timeout=300)
+
+        msg = f"Votre code Blaze est : {otp}. Il est valide 5 minutes."
+
+        # 👉 Envoi du SMS
+        send_sms(phone, msg)
+
         return {"phone_number": phone, "otp": otp if settings.DEBUG else "SENT"}
 
 

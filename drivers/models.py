@@ -47,6 +47,9 @@ class Driver(models.Model):
     must_reset_password = models.BooleanField(default=True)
     onboarding_completed = models.BooleanField(default=False)
 
+    is_blocked = models.BooleanField(default=False)
+    block_reason = models.CharField(max_length=255, blank=True, default='')
+
     created_at = models.DateTimeField(default=timezone.now)
 
     is_online = models.BooleanField(default=False)
