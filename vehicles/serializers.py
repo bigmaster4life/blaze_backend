@@ -130,6 +130,8 @@ class RentalSerializer(serializers.ModelSerializer):
         """
         request = self.context.get('request')
         user = request.user if request and request.user.is_authenticated else None
+        if not user:
+            raise serializers.ValidationError({"detail": "Authentification requise."})
         validated['user'] = user
 
         # hold 30 minutes
@@ -145,3 +147,4 @@ class RentalSerializer(serializers.ModelSerializer):
         from .models import set_vehicle_availability
         set_vehicle_availability(rental.vehicle)
         return rental
+    

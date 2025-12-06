@@ -9,6 +9,7 @@ from django.db.models import Exists, OuterRef, Q
 from django.utils.dateparse import parse_datetime
 from .serializers import VehicleSerializer, PromoSerializer, RentalSerializer
 from rest_framework.permissions import IsAuthenticatedOrReadOnly, AllowAny
+from rest_framework.exceptions import PermissionDenied
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from decimal import Decimal
@@ -105,6 +106,12 @@ class RentalViewSet(viewsets.ModelViewSet):
             return qs
         # un user voit ses rentals
         return qs.filter(user=self.request.user)
+    
+    def perform_create(self, serializer):
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            raise PermissionDenied("Authentification requise.")
+        serializer.save(user=user)
 
     @transaction.atomic
     @action(detail=True, methods=['post'])
