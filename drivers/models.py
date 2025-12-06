@@ -19,6 +19,12 @@ class Driver(models.Model):
         ('clim', 'Climatisé'),
         ('vip', 'VIP'),
     ]
+    STATUS_CHOICES = [
+        ('pending', 'En attente'),
+        ('approved', 'Approuvé'),
+        ('rejected', 'Rejeté'),
+    ]
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
 
     full_name = models.CharField(max_length=100)
     email = models.EmailField(default='default_driver@example.com')
