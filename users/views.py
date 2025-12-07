@@ -238,7 +238,7 @@ class RequestOTPEmailView(APIView):
         from .serializers import EmailOTPRequestSerializer
         ser = EmailOTPRequestSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        data = ser.save()
+        ser.save()
 
         return Response(
             {

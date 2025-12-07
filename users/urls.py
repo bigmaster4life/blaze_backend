@@ -8,6 +8,7 @@ router.register(r'profiles', CustomerProfileViewSet, basename='profile')
 
 
 urlpatterns = [
+    path('', UserListView.as_view(), name='user-root-list'),
     path('register/', RegisterView.as_view(), name='register'),
     path('me/', MeView.as_view(), name='me'),
     path('login/', LoginView.as_view(), name='login'),

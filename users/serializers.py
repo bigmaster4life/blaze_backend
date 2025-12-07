@@ -301,24 +301,13 @@ class EmailOTPRequestSerializer(serializers.Serializer):
 
         email = validated_data["email"]
 
-        # ➤ retrouver l'utilisateur Blaze
-        try:
-            user = CustomUser.objects.get(email=email)
-        except CustomUser.DoesNotExist:
-            raise serializers.ValidationError({"email": "Aucun utilisateur avec cet email."})
-
-        phone = user.phone_number
-        if not phone:
-            raise serializers.ValidationError({"email": "Cet utilisateur n’a pas de numéro lié."})
-
         # ➤ Génération OTP
         otp = f"{random.randint(0, 999999):06d}"
-        cache.set(f"otp:{phone}", otp, timeout=300)  # 5 minutes
+        cache.set(f"email_otp:{email}", otp, timeout=300)  # 5 minutes
 
         # ➤ Envoi email
         subject = "Votre code Blaze"
         message = (
-            f"Bonjour {user.full_name or ''},\n\n"
             f"Voici votre code OTP : {otp}\n"
             f"Il est valable pendant 5 minutes.\n\n"
             "— Équipe Blaze"
@@ -329,7 +318,6 @@ class EmailOTPRequestSerializer(serializers.Serializer):
 
         return {
             "email": email,
-            "phone_number": phone,
             "expires_in": 300,
             "otp": otp if settings.DEBUG else "SENT"
         }
