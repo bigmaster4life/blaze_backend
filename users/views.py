@@ -230,3 +230,20 @@ class SetPasswordView(APIView):
         user.set_password(new_password)
         user.save(update_fields=["password"])
         return Response({"ok": True, "must_change_password": False}, status=200)
+    
+class RequestOTPEmailView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        from .serializers import EmailOTPRequestSerializer
+        ser = EmailOTPRequestSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        data = ser.save()
+
+        return Response(
+            {
+                "detail": "OTP envoyé par email.",
+            }, 
+            status=200
+        )
+
