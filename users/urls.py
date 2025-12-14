@@ -1,5 +1,5 @@
 from django.urls import path, include
-from .views import RegisterView, MeView, LoginView, UserListView, CustomerProfileViewSet, PhoneLoginView, RequestOTPView, VerifyOTPView, SetPasswordView, RequestOTPEmailView
+from .views import RegisterView, MeView, LoginView, UserListView, CustomerProfileViewSet, PhoneLoginView, RequestOTPView, VerifyOTPView, SetPasswordView, RequestOTPEmailView, CheckPhoneView
 from rest_framework.routers import DefaultRouter
 
 
@@ -15,6 +15,7 @@ urlpatterns = [
     path('login-phone/', PhoneLoginView.as_view(), name='login_phone'),
     
     path('auth/request_otp/', RequestOTPView.as_view(), name='request-otp'),
+    path("auth/check-phone/", CheckPhoneView.as_view(), name="auth-check-phone"),
     path('auth/verify_otp/', VerifyOTPView.as_view(), name='verify-otp'),
     path('list/', UserListView.as_view(), name='user-list'),
     path('set-password/', SetPasswordView.as_view(), name='users-set-password'),

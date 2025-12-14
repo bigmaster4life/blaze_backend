@@ -278,46 +278,57 @@ class PhoneOTPVerifySerializer(serializers.Serializer):
         base = build_auth_payload(user)
 
         # on ajoute les flags spécifiques OTP
-        base["is_new_user"] = created
+        base["is_new_user"] = must_change
         base["must_change_password"] = must_change
+        base["status"] = "new_user" if created else "existing_user"
 
         return base
     
 class EmailOTPRequestSerializer(serializers.Serializer):
+    phone_number = serializers.CharField()
     email = serializers.EmailField()
 
-    def validate_email(self, value):
-        value = value.strip().lower()
-        if not value:
-            raise serializers.ValidationError("Email requis.")
-        return value
+    def validate(self, attrs):
+        from .utils import normalize_phone_gabon
+
+        email = attrs.get("email", "").strip().lower()
+        phone = normalize_phone_gabon(attrs.get("phone_number"))
+
+        if not phone:
+            raise serializers.ValidationError({"phone_number": "Numéro invalide."})
+
+        attrs["email"] = email
+        attrs["phone_number"] = phone
+        return attrs
 
     def create(self, validated_data):
-        from .models import CustomUser
         from django.core.mail import send_mail
-        from django.core.cache import cache
         from django.conf import settings
-        import random
 
+        phone = validated_data["phone_number"]
         email = validated_data["email"]
 
-        # ➤ Génération OTP
+        # 🔥 Génère le même OTP que pour SMS (Option 1 : OTP unique)
         otp = f"{random.randint(0, 999999):06d}"
-        cache.set(f"email_otp:{email}", otp, timeout=300)  # 5 minutes
 
-        # ➤ Envoi email
+        # 🔥 Stocke EXACTEMENT à la même clé que l'envoi SMS
+        cache.set(f"otp:{phone}", otp, timeout=300)
+
         subject = "Votre code Blaze"
         message = (
-            f"Voici votre code OTP : {otp}\n"
-            f"Il est valable pendant 5 minutes.\n\n"
+            f"Votre code OTP est : {otp}\n"
+            f"Il est valable 5 minutes.\n\n"
             "— Équipe Blaze"
         )
         from_email = getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@blaze.com")
 
+        # Envoi email
         send_mail(subject, message, from_email, [email], fail_silently=False)
 
         return {
+            "phone_number": phone,
             "email": email,
             "expires_in": 300,
-            "otp": otp if settings.DEBUG else "SENT"
+            # Ne renvoie jamais l’OTP en prod
+            "otp": otp if settings.DEBUG else "SENT",
         }

@@ -16,6 +16,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from drivers.models import Driver
+from .utils import normalize_phone_gabon
 
 class IsOwnerProfile(permissions.BasePermission):
     def has_object_permission(self, request, view, obj):
@@ -243,7 +244,48 @@ class RequestOTPEmailView(APIView):
         return Response(
             {
                 "detail": "OTP envoyé par email.",
+                "phone_number": ser.validated_data["phone_number"],
+                "expires_in": 300
             }, 
             status=200
         )
 
+class CheckPhoneView(APIView):
+    """
+    POST /api/users/auth/check-phone/
+    Body: { "phone_number": "+241074562847" }
+    Réponse:
+    {
+      "exists": true/false,
+      "has_password": true/false
+    }
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        raw = request.data.get("phone_number", "")
+        phone = normalize_phone_gabon(raw)
+
+        if not phone:
+            return Response(
+                {"detail": "Numéro invalide."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            user = CustomUser.objects.get(phone_number=phone)
+        except CustomUser.DoesNotExist:
+            return Response(
+                {"exists": False, "has_password": False},
+                status=status.HTTP_200_OK,
+            )
+
+        has_password = user.has_usable_password() and bool((user.password or "").strip())
+
+        return Response(
+            {
+                "exists": True,
+                "has_password": has_password,
+            },
+            status=status.HTTP_200_OK,
+        )
