@@ -40,7 +40,7 @@ GOOGLE_KEY = env("PLACES_DIRECTIONS_KEY")
 
 ALLOWED_HOSTS = env.list(
     "ALLOWED_HOSTS",
-    default=["localhost", "127.0.0.1", "192.168.1.161", "10.0.2.2", "0.0.0.0"],
+    default=["localhost", "127.0.0.1", "192.168.1.161", "10.0.2.2", "0.0.0.0", "be.blazepro.org", "51.210.177.126"],
 )
 
 
@@ -290,3 +290,5 @@ AIRTEL_MONEY = {
 
 PAUSE_FREE_SECONDS = 5 * 60
 PAUSE_RATE_PER_MIN = 250  # XAF
+
+
