@@ -6,7 +6,7 @@ from .serializers import (
     RegisterSerializer, UserSerializer, CustomerProfileSerializer, PhoneLoginSerializer, PhoneOTPRequestSerializer, PhoneOTPVerifySerializer
 )
 from rest_framework import status, viewsets, permissions
-from .models import CustomUser, CustomerProfile
+from .models import CustomUser, CustomerProfile, EmailOTP
 from django.contrib.auth import authenticate
 from rest_framework.authtoken.models import Token
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -16,7 +16,11 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from drivers.models import Driver
+from django.utils import timezone
 from .utils import normalize_phone_gabon
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
 
 class IsOwnerProfile(permissions.BasePermission):
     def has_object_permission(self, request, view, obj):
@@ -40,86 +44,100 @@ class MeView(APIView):
         return Response(serializer.data)
 
 class LoginView(APIView):
-    """
-    Login email + mot de passe (peut servir pour admin / backoffice).
-    Réponse alignée avec le format mobile:
-
-    {
-      "access": "...",
-      "refresh": "...",
-      "user": {
-        "id": ...,
-        "phone_number": "...",
-        "email": "...",
-        "userType": "driver" | "customer",
-        "full_name": "..."
-      },
-      "driver_profile": {
-        "id": ...,
-        "category": "...",
-        "vehicle_plate": "..."
-      }  # seulement si c'est un chauffeur
-    }
-    """
     permission_classes = [AllowAny]
 
     def post(self, request):
         email = request.data.get('email')
+        phone = request.data.get('phone')
         password = request.data.get('password')
 
-        if not email or not password:
+        if not password:
+            return Response({"detail": "password required"}, status=400)
+
+        # 1️⃣ Auth par EMAIL si fourni
+        if email:
+            user = authenticate(request, email=email, password=password)
+
+        # 2️⃣ Sinon auth par téléphone
+        elif phone:
+            try:
+                user_obj = CustomUser.objects.get(phone_number=phone)
+            except CustomUser.DoesNotExist:
+                return Response({"detail": "Numéro introuvable"}, status=401)
+
+            user = authenticate(request, email=user_obj.email, password=password)
+
+        else:
             return Response(
-                {"detail": "email and password required"},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"detail": "email or phone required"},
+                status=400
             )
 
-        user = authenticate(request, email=email, password=password)
         if user is None:
-            return Response(
-                {'detail': 'Identifiants invalides'},
-                status=status.HTTP_401_UNAUTHORIZED
-            )
+            return Response({"detail": "Identifiants invalides"}, status=401)
 
         # JWT
         refresh = RefreshToken.for_user(user)
         access_token = str(refresh.access_token)
 
-        # userType: on mappe ton champ user_type -> "driver" | "customer"
-        raw_type = getattr(user, "user_type", None) or getattr(user, "userType", None)
-        raw_type = (raw_type or "").lower()
+        # userType
+        raw_type = getattr(user, "user_type", "").lower()
         if raw_type in ("driver", "chauffeur"):
             user_type = "driver"
-        elif raw_type in ("customer", "client"):
-            user_type = "customer"
         else:
-            # fallback : si un profil driver existe, alors "driver"
-            user_type = "driver" if Driver.objects.filter(user=user).exists() else "customer"
+            user_type = "customer"
 
-        # Profil chauffeur, si existant
-        driver_profile = Driver.objects.filter(user=user).first()
+        profile = CustomerProfile.objects.filter(user=user).first()
+
+        first_name = ""
+        last_name = ""
+        photo_url = ""
+
+        if profile:
+            first_name = profile.first_name or ""
+            last_name = profile.last_name or ""
+            if profile.photo:
+                try:
+                    photo_url = profile.photo.url
+                except:
+                    photo_url = str(profile.photo)
+
+        if not first_name:
+            first_name = getattr(user, "first_name", "") or ""
+        if not last_name:
+            last_name = getattr(user, "last_name", "") or ""
+
+        full_name = f"{first_name} {last_name}".strip()
+
+        # Chauffeur (si il y en a un)
+        driver_profile_obj = Driver.objects.filter(user=user).first()
 
         data = {
             "access": access_token,
             "refresh": str(refresh),
             "user": {
                 "id": user.id,
-                "phone_number": getattr(user, "phone_number", "") or "",
+                "phone_number": user.phone_number or "",
                 "email": user.email or "",
                 "userType": user_type,
-                "full_name": getattr(user, "full_name", "") or (
-                    f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
-                ),
+
+                "first_name": first_name,
+                "last_name": last_name,
+                "full_name": full_name,
+                "photo": photo_url,
+                "photo_url": photo_url,
+
             },
         }
 
-        if driver_profile:
+        if driver_profile_obj:
             data["driver_profile"] = {
-                "id": driver_profile.id,
-                "category": getattr(driver_profile, "category", None),
-                "vehicle_plate": getattr(driver_profile, "vehicle_plate", None),
+                "id": driver_profile_obj.id,
+                "category": driver_profile_obj.category,
+                "vehicle_plate": driver_profile_obj.vehicle_plate,
             }
 
-        return Response(data, status=status.HTTP_200_OK)
+        return Response(data, status=200)
 
 class UserListView(ListAPIView):
     queryset = CustomUser.objects.all()
@@ -192,6 +210,45 @@ class VerifyOTPView(APIView):
         ser.is_valid(raise_exception=True)
         data = ser.save()  # tokens + user + is_new_user
         return Response(data, status=status.HTTP_200_OK)
+    
+class VerifyOTPEmailView(APIView):
+    def post(self, request):
+        email = request.data.get("email")
+        otp = request.data.get("otp")
+
+        if not email or not otp:
+            return Response({"detail": "Email ou code manquant."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            otp_obj = EmailOTP.objects.get(email=email, otp=otp)
+        except EmailOTP.DoesNotExist:
+            return Response({"detail": "Code OTP invalide."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        if otp_obj.expires_at < timezone.now():
+            return Response({"detail": "Code expiré."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # récupérer l'utilisateur
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            return Response({"detail": "Utilisateur introuvable"},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        # supprimer OTP pour éviter réutilisation
+        otp_obj.delete()
+
+        # créer un token JWT temporaire
+        refresh = RefreshToken.for_user(user)
+        access = str(refresh.access_token)
+
+        return Response({
+            "access": access,
+            "refresh": str(refresh),
+            "user_id": user.id
+        })
     
 class SetPasswordView(APIView):
     permission_classes = [IsAuthenticated]

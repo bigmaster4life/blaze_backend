@@ -2,6 +2,8 @@
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 from django.conf import settings
+from django.utils import timezone
+from datetime import timedelta
 
 class CustomUserManager(BaseUserManager):
     def create_user(self, email, password=None, first_name=None, last_name=None, user_type=None, **extra_fields):
@@ -100,3 +102,20 @@ class CustomerProfile(models.Model):
         # ✅ le champ s’appelle phone_number, pas phone
         phone = self.user.phone_number or ''
         return f"Profil de {phone}".strip()
+    
+class EmailOTP(models.Model):
+    email = models.EmailField()
+    otp = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    @staticmethod
+    def create_otp(email, otp_code):
+        return EmailOTP.objects.create(
+            email=email,
+            otp=otp_code,
+            expires_at=timezone.now() + timedelta(minutes=5)
+        )
+
+    def __str__(self):
+        return f"{self.email} - {self.otp}"
