@@ -14,3 +14,11 @@ venv/
 
 # OS
 .DS_Store
+
+# Ignore database files
+db.sqlite3
+*.sqlite3*
+*.backup*
+
+# Ignore uploaded media
+media/
