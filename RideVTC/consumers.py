@@ -273,6 +273,14 @@ class DriverConsumer(AsyncJsonWebsocketConsumer):
             # ID invalide → on ferme proprement
             await self.close()
             return
+        
+        user = self.scope.get("user", AnonymousUser())
+        auth_id = getattr(user, "id", None)
+
+        logger.info(
+            "[WS] driver CONNECT path_id=%s auth_id=%s channel=%s",
+            self.user_id, auth_id, self.channel_name
+        )
 
         # Query params
         q = parse_qs(self.scope.get("query_string", b"").decode())
@@ -345,13 +353,49 @@ class DriverConsumer(AsyncJsonWebsocketConsumer):
         })
 
     async def receive_json(self, content, **kwargs):
+        logger.warning("[PING-DEBUG] raw content from driver %s → %s", self.user_id, content)
         logger.info("[WS][Driver] recv from driver#%s → %s", self.user_id, content)
         t = content.get("type")
 
         # ping → mise à jour présence (async Redis)
         if t == "ping":
+            lat = content.get("lat")
+            lng = content.get("lng")
+            try:
+                lat = float(lat)
+                lng = float(lng)
+            except:
+                lat = None
+                lng = None
             await _presence_touch(int(self.user_id))
+            await database_sync_to_async(self._db_presence_touch)()
+            if lat is not None and lng is not None:
+                try:
+                    from RideVTC.models import RideVehicle
+                    def _update():
+                        v = RideVehicle.objects.filter(driver_id=int(self.user_id)).first()
+                        if v:
+                            v.latitude = lat
+                            v.longitude = lng
+                            v.city = self.area or "city-default"
+                            v.save(update_fields=["latitude", "longitude", "city"])
+                    await database_sync_to_async(_update)()
+                except Exception as e:
+                    logger.warning("[PING] update RideVehicle failed: %s", e)
             await self.send_json({"type": "pong"})
+            return
+        
+        if t == "location":
+            lat = content.get("lat")
+            lng = content.get("lng")
+            try:
+                lat = float(lat)
+                lng = float(lng)
+            except:
+                logger.warning(f"[WS][Driver] invalid lat/lng from driver#{self.user_id}: {content}")
+                return
+            await database_sync_to_async(self._update_driver_location)(lat, lng)
+            logger.info(f"[GPS] driver#{self.user_id} → lat={lat} lng={lng}")
             return
 
         # 💬 CHAT: message envoyé par le CHAUFFEUR vers le CLIENT
@@ -633,3 +677,30 @@ class DriverConsumer(AsyncJsonWebsocketConsumer):
                 pass
 
         return True, {"user_id": r.user_id}
+    
+    @database_sync_to_async
+    def _update_driver_location(self, lat, lng):
+        from RideVTC.models import RideVehicle
+        try:
+            v = RideVehicle.objects.get(driver_id=int(self.user_id))
+            v.latitude = lat
+            v.longitude = lng
+            v.save(update_fields=["latitude", "longitude"])
+        except RideVehicle.DoesNotExist:
+            logger.warning(f"[GPS] RideVehicle not found for driver {self.user_id}")
+    
+    def _db_presence_touch(self):
+        """Mise à jour de la présence côté base de données (sync)."""
+        from RideVTC.models import DriverPresence
+        from django.utils import timezone
+        try:
+            DriverPresence.objects.update_or_create(
+                driver_id=int(self.user_id),
+                defaults={
+                    "is_online": True,
+                    "last_seen": timezone.now(),
+                    "city": self.area or "city-default"
+                }
+            )
+        except Exception as e:
+            logger.warning("DriverConsumer _db_presence_touch failed: %s", e)

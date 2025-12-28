@@ -3,6 +3,8 @@ from django.core.cache import cache
 from django.conf import settings
 from datetime import timedelta
 from django.utils import timezone
+
+from RideVTC.serializers import DriverVehicleMeSerializer
 from .models import (
     CustomUser
 )
@@ -67,17 +69,10 @@ def build_auth_payload(user: CustomUser) -> dict:
 
     # ⬇️ OPTIONNEL : profil chauffeur / véhicule principal
     if user_type == "driver" and RideVehicle is not None:
-        try:
-            vehicle = RideVehicle.objects.filter(driver=user).order_by("id").first()
-        except Exception:
-            vehicle = None
+        vehicle = RideVehicle.objects.filter(driver=user).first()
 
         if vehicle:
-            data["driver_profile"] = {
-                "id": vehicle.id,
-                "category": getattr(vehicle, "category", None),
-                "vehicle_plate": getattr(vehicle, "license_plate", None) or getattr(vehicle, "vehicle_plate", None),
-            }
+            data["driver_profile"] = DriverVehicleMeSerializer(vehicle).data
 
     return data
 
@@ -105,6 +100,11 @@ class RegisterSerializer(serializers.ModelSerializer):
         }
 
     def create(self, validated_data):
+        raw = validated_data.get("user_type", "").lower()
+        if raw in ("chauffeur", "driver"):
+            validated_data["user_type"] = "chauffeur"
+        else:
+            validated_data["user_type"] = "customer"
         password = validated_data.pop('password')
         user = CustomUser.objects.create_user(
             **validated_data
@@ -164,7 +164,6 @@ class PhoneLoginSerializer(serializers.Serializer):
           "driver_profile": { ... }  # si applicable
         }
         """
-        from .serializers import build_auth_payload  # import interne
         user = validated_data["user"]
         return build_auth_payload(user)
     

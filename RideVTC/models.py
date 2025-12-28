@@ -2,11 +2,17 @@
 
 from django.db import models
 from django.conf import settings
+from drivers.models import Driver
 
 class RideVehicle(models.Model):
-    driver = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='ride_vehicles')
+    driver = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='ride_vehicles'
+    )
     brand = models.CharField(max_length=100)
     model = models.CharField(max_length=100)
+    
 
     plate = models.CharField(max_length=32, unique=True, null=True, blank=True)
     color = models.CharField(max_length=32, null=True, blank=True)
@@ -14,7 +20,11 @@ class RideVehicle(models.Model):
     insurance_valid_until = models.DateField(null=True, blank=True)
     technical_valid_until = models.DateField(null=True, blank=True)
 
-    category = models.CharField(max_length=50)  # ex: SUV, Berline, Moto
+    category = models.CharField(
+        max_length=10,
+        choices=Driver.CATEGORY_CHOICES,
+        default='eco',
+      )  # ex: SUV, Berline, Moto
     city = models.CharField(max_length=100)
     latitude = models.FloatField()
     longitude = models.FloatField()
@@ -22,6 +32,7 @@ class RideVehicle(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
+        email = getattr(self.driver, "email", None) or "?"
         return f"{self.brand} {self.model} ({self.driver.email})"
 
 
@@ -35,6 +46,11 @@ class Ride(models.Model):
         ('completed', 'Terminée'),
         ('cancelled', 'Annulée'),
     ]
+    CATEGORY_CHOICES = [
+        ('eco', 'Éco'),
+        ('clim', 'Climatisé'),
+        ('vip', 'VIP'),
+    ]
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -47,6 +63,11 @@ class Ride(models.Model):
         null=True,
         blank=True,
         related_name='driven_rides'
+    )
+    category = models.CharField(
+        max_length=10,
+        choices=CATEGORY_CHOICES,
+        default='eco'
     )
     vehicle = models.ForeignKey(
         'RideVehicle',
@@ -76,6 +97,7 @@ class Ride(models.Model):
     customer_rating = models.PositiveSmallIntegerField(null=True, blank=True)
     customer_comment = models.TextField(null=True, blank=True)
     rated_at = models.DateTimeField(null=True, blank=True)
+    pickup_city = models.CharField(max_length=64, blank=True, null=True, default="")
 
     def __str__(self):
         return f"Course #{self.id} - {self.user.email} ➡ {self.dropoff_location}"
@@ -157,6 +179,7 @@ class DriverPresence(models.Model):
         on_delete=models.CASCADE,
         related_name="presence"
     )
+    city = models.CharField(max_length=50, default="", blank=True)
     is_online = models.BooleanField(default=False)
     last_seen = models.DateTimeField(null=True, blank=True)
 

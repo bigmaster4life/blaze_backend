@@ -39,6 +39,8 @@ from django.db.models import Count, Avg
 from django.db.models.functions import TruncHour
 from .permissions import IsDriverOrStaff
 from users.models import CustomerProfile
+from .dispatch import dispatch_ride_offer
+
 
 from asgiref.sync import async_to_sync
 try:
@@ -75,7 +77,10 @@ def _compute_pause_fee(total_seconds: int) -> int:
 class IsDriver(permissions.BasePermission):
     def has_permission(self, request, view):
         user = request.user
-        return bool(user and user.is_authenticated and getattr(user, 'is_driver', False))
+        if not user or not user.is_authenticated:
+            return False
+        raw_type = (getattr(user, "user_type", "") or "").lower()
+        return raw_type in ("chauffeur", "driver")
 
 
 class RideVehicleViewSet(ModelViewSet):
@@ -285,30 +290,39 @@ class RideViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         ser = self.get_serializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
+        logger.warning("DEBUG CREATE RIDE → pickup_lat=%s pickup_lng=%s area=%s category=%s RAW_BODY=%s",
+            request.data.get("pickup_lat"),
+            request.data.get("pickup_lng"),
+            request.data.get("area"),
+            request.data.get("category"),
+            request.data
+        )
         ride: Ride = ser.save(status="pending", accepted_at=None, completed_at=None)
 
         def _clean(s: str) -> str:
+            import re
             return re.sub(r"[^0-9A-Za-z_.-]", "_", (s or "").strip().lower())[:50]
 
-        category = _clean(request.data.get("category") or "eco")
-        area = _clean(request.data.get("area") or "city-default")
+        raw_area = request.data.get("area") or "city-default"
+        area = _clean(raw_area)
 
+        # Catégorie demandée pour la course (par défaut 'eco')
+        preferred_category = (
+            request.data.get("category")
+            or getattr(ride, "category", None)
+            or "eco"
+        )
+
+        # Dispatch après commit de la transaction
         if channel_layer:
-            raw_al = request.headers.get("Accept-Language", "fr")
-            lang = (raw_al.split(",")[0].strip()[:5] or "fr") if raw_al else "fr"
-
-            payload = build_ride_offer_payload(
-                ride,
-                category=category,
-                area=area,
-                language=lang,
-            )
-            room = pool_room(category, area)  # ex: "pool.eco.city-default"
-            async_to_sync(channel_layer.group_send)(
-                room,
-                {"type": "ride.requested", "ride": payload}
-            )
-            logger.info("[WS] sent ride.requested → group=%s ride_id=%s", room, ride.id)
+            if ride:
+                transaction.on_commit(
+                    lambda: dispatch_ride_offer(
+                        ride_id=ride.id,
+                        area=area,
+                        preferred_category=preferred_category,
+                    )
+                )
 
         return Response(RideSerializer(ride).data, status=status.HTTP_201_CREATED)
 
@@ -324,10 +338,35 @@ class RideViewSet(viewsets.ModelViewSet):
     def accept(self, request, pk=None):
         ride = get_object_or_404(Ride.objects.select_for_update(), pk=pk)
 
+        # Si la course n'est plus "pending", on garde ton comportement actuel
         if ride.status != "pending":
             return Response({"detail": f"Already {ride.status}"}, status=409)
+        
+        if ride.driver_id and ride.driver_id != request.user.id:
+            return Response(
+                {"detail": "Ride reserved for another driver."},
+                status=status.HTTP_409_CONFLICT,
+            )
 
-        # Chauffeur authentifié
+        # ───── Timeout d'acceptation (8–10s) ─────
+        timeout_s = int(getattr(settings, "RIDE_ACCEPT_TIMEOUT_S", 10))
+        created_at = getattr(ride, "created_at", None)
+
+        if created_at is not None:
+            age = (timezone.now() - created_at).total_seconds()
+            if age > timeout_s:
+                # l'offre est expirée pour ce driver
+                return Response(
+                    {
+                        "detail": "Offer expired (timeout).",
+                        "code": "offer_timeout",
+                        "timeout_s": timeout_s,
+                        "age_s": int(age),
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+        # Chauffeur authentifié → on l'assigne
         ride.driver = request.user
         ride.status = "accepted"
         if hasattr(ride, "accepted_at"):
@@ -362,19 +401,17 @@ class RideViewSet(viewsets.ModelViewSet):
                         },
                         "price": str(ride.price),
                         "status": ride.status,
-
-                        # ✅ ajouts lisibles pour le client aussi
                         "pickup_label": (ride.pickup_location or None),
                         "dropoff_label": (ride.dropoff_location or None),
                         "price_text": f"{int(ride.price)} FCFA" if ride.price is not None else "—",
                     },
                 }
-                # 1) Format générique (relay via AppConsumer.evt → {event, payload})
+                # Format générique
                 evt_msg = {"type": "evt", "event": "ride.accepted", "payload": payload}
                 async_to_sync(channel_layer.group_send)(client_group, evt_msg)
                 async_to_sync(channel_layer.group_send)(alt_group,    evt_msg)
 
-                # 2) Format direct (certains front écoutent msg.type)
+                # Format direct
                 direct_msg = {
                     "type": "ride.accepted",
                     "requestId": ride.id,
@@ -383,7 +420,8 @@ class RideViewSet(viewsets.ModelViewSet):
                 }
                 async_to_sync(channel_layer.group_send)(client_group, direct_msg)
                 async_to_sync(channel_layer.group_send)(alt_group,    direct_msg)
-                # (facultatif) notifier aussi le chauffeur affecté (canal privé)
+
+                # Notifier aussi le chauffeur
                 async_to_sync(channel_layer.group_send)(
                     driver_room(ride.driver_id),
                     {"type": "evt", "event": "ride.assigned", "payload": {"requestId": ride.id}},
@@ -393,6 +431,58 @@ class RideViewSet(viewsets.ModelViewSet):
                 logger.exception("WS emit (accept) failed")
 
         return Response({"ok": True})
+    
+    @transaction.atomic
+    @action(detail=True, methods=["post"], url_path="queue")
+    def queue(self, request, pk=None):
+        """
+        Met la course en "attente" pour ce chauffeur :
+          - status reste 'pending'
+          - driver est fixé à request.user
+          - les autres chauffeurs ne peuvent plus accepter (voir accept()).
+        """
+        ride = get_object_or_404(Ride.objects.select_for_update(), pk=pk)
+
+        if ride.status != "pending":
+            return Response(
+                {"detail": f"Cannot queue ride in status '{ride.status}'"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # Si déjà réservée pour un autre chauffeur
+        if ride.driver_id and ride.driver_id != request.user.id:
+            return Response(
+                {"detail": "Ride already queued for another driver."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # Réservation pour ce chauffeur (sans changer le status)
+        ride.driver = request.user
+        ride.save(update_fields=["driver"])
+
+        # Optionnel : notifier le client qu'un chauffeur a réservé la course
+        if channel_layer:
+            try:
+                payload = {
+                    "requestId": ride.id,
+                    "driver": {
+                        "id": ride.driver_id,
+                        "phone_number": getattr(ride.driver, "phone_number", None),
+                    },
+                }
+                for g in {user_room(ride.user_id), f"user.{ride.user_id}"}:
+                    async_to_sync(channel_layer.group_send)(
+                        g,
+                        {
+                            "type": "evt",
+                            "event": "ride.queued",
+                            "payload": payload,
+                        },
+                    )
+            except Exception:
+                logger.exception("WS emit (queue) failed")
+
+        return Response({"ok": True, "status": "pending", "driver_id": ride.driver_id})
     
     # ───────────────────────────────────────────────────────────
     # PAUSE: Client en pause + calcul du tarif
@@ -853,6 +943,91 @@ class RideViewSet(viewsets.ModelViewSet):
             pass
 
         return Response({"detail": "Ride force-completed", "ride_id": ride.id}, status=200)
+    
+    @transaction.atomic
+    @action(detail=True, methods=["post"], url_path="reject")
+    def reject(self, request, pk=None):
+        """
+        Un chauffeur refuse une offre :
+        - la course reste en 'pending'
+        - on exclut ce chauffeur du prochain dispatch
+        - on renvoie l'offre à d'autres chauffeurs dispo (s'il y en a)
+        """
+        ride = get_object_or_404(Ride.objects.select_for_update(), pk=pk)
+
+        if ride.status != "pending":
+            return Response({"detail": f"Already {ride.status}"}, status=409)
+
+        # On "dés-assigne" la course (au cas où)
+        ride.driver = None
+        if hasattr(ride, "accepted_at"):
+            ride.accepted_at = None
+            ride.save(update_fields=["driver", "status", "accepted_at"])
+        else:
+            ride.save(update_fields=["driver", "status"])
+
+        # Chauffeur qui refuse → on l'exclut des prochains candidats
+        rejecting_driver_id = getattr(request.user, "id", None)
+        exclude_ids = [rejecting_driver_id] if rejecting_driver_id else []
+
+        pickup_lat = ride.pickup_lat
+        pickup_lng = ride.pickup_lng
+
+        if pickup_lat is None or pickup_lng is None:
+            # pas de position pickup → on ne peut pas redispatcher proprement
+            return Response({"ok": True, "redispatched": False, "reason": "no_pickup_coords"})
+
+        # catégorie demandée pour cette course
+        driver_category = getattr(ride, "category", None)
+        if driver_category not in ("eco", "clim", "vip"):
+            driver_category = None
+
+        # langue du driver (pour le texte dans le payload)
+        raw_al = request.headers.get("Accept-Language", "fr")
+        lang = (raw_al.split(",")[0].strip()[:5] or "fr") if raw_al else "fr"
+
+        # area : juste un label informatif pour le payload
+        area = "city-default"
+
+        # On refait un dispatch mais en excluant ce chauffeur
+
+
+        # Chauffeur qui refuse → on l'exclut des prochains candidats
+        rejecting_driver_id = getattr(request.user, "id", None)
+        exclude_ids = [rejecting_driver_id] if rejecting_driver_id else []
+
+        pickup_lat = ride.pickup_lat
+        pickup_lng = ride.pickup_lng
+
+        if pickup_lat is None or pickup_lng is None:
+            # pas de position pickup → on ne peut pas redispatcher proprement
+            return Response({"ok": True, "redispatched": False, "reason": "no_pickup_coords"})
+
+        # catégorie demandée pour cette course
+        driver_category = getattr(ride, "category", None)
+        if driver_category not in ("eco", "clim", "vip"):
+            driver_category = None
+
+        # langue du driver (pour le texte dans le payload, si besoin plus tard)
+        raw_al = request.headers.get("Accept-Language", "fr")
+        lang = (raw_al.split(",")[0].strip()[:5] or "fr") if raw_al else "fr"
+
+        # area : juste un label informatif pour le payload
+        area = "city-default"
+
+        # On relance un dispatch vers un autre chauffeur (si dispo)
+        if channel_layer:
+            transaction.on_commit(
+                lambda: dispatch_ride_offer(
+                    ride_id=ride.id,
+                    area=area,
+                    preferred_category=driver_category or "eco",
+                    extra_exclude_driver_ids=exclude_ids,
+                )
+            )
+
+        return Response({"ok": True, "redispatched": True})
+        raw_category = driver_category or "eco"
 
 
 
@@ -1182,7 +1357,7 @@ class DriverVehicleMe(APIView):
                 driver=request.user,
                 brand='',
                 model='',
-                category='Berline',
+                category='eco',
                 city='-',
                 latitude=0.0,
                 longitude=0.0,
@@ -1258,3 +1433,35 @@ class DriverNavEventViewSet(mixins.CreateModelMixin,
             "by_type": list(by_type),
             "per_hour": [{"hour": row["h"], "count": row["n"]} for row in per_hour],
         })
+
+class DriverPresenceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+
+        raw_type = (getattr(user, "user_type", "") or "").lower()
+
+        if raw_type not in ("chauffeur", "driver"):
+            return Response({"detail": "Not a driver"}, status=403)
+
+        online = bool(request.data.get("online", True))
+        lat = request.data.get("lat")
+        lng = request.data.get("lng")
+
+        pres, _ = DriverPresence.objects.get_or_create(driver=user)
+        pres.is_online = online
+        pres.last_seen = timezone.now()
+
+        if lat is not None:
+            pres.lat = lat
+        if lng is not None:
+            pres.lng = lng
+
+        city = request.data.get("city")
+        if city:
+            pres.city = city
+
+        pres.save()
+
+        return Response({"ok": True})

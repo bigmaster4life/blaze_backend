@@ -224,6 +224,17 @@ CSRF_TRUSTED_ORIGINS = env.list(
 )
 
 
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = env.bool("SECURE_SSL_REDIRECT", default=True)
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
+    # Ajout des protections manquantes
+    SECURE_HSTS_SECONDS = env.int("SECURE_HSTS_SECONDS", default=31536000)  # 1 an
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+
 # Adresse expéditeur par défaut
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "no-reply@blaze.app")
 
@@ -245,17 +256,9 @@ else:
     SERVER_EMAIL = env("SERVER_EMAIL", default=DEFAULT_FROM_EMAIL)
     ADMINS = [("Tech", env("ADMIN_EMAIL", default="ops@blazepro.org"))]
 
-if not DEBUG:
-    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-    SECURE_SSL_REDIRECT = env.bool("SECURE_SSL_REDIRECT", default=True)
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
-    SECURE_HSTS_SECONDS = env.int("SECURE_HSTS_SECONDS", default=0)  # mets 31536000 en prod stable
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = False
-    SECURE_HSTS_PRELOAD = False
 
 # ─────────────────────────────────────────────
-# LOGGING (ajoute ça à la fin)
+# LOGGING
 # ─────────────────────────────────────────────
 LOGGING = {
     "version": 1,
@@ -270,6 +273,32 @@ LOGGING = {
         "django.channels": {"handlers": ["console"], "level": "INFO"},
     },
 }
+
+# ─────────────────────────────────────────────
+# SENTRY — Monitoring des erreurs en production
+# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# SENTRY — Monitoring des erreurs en production
+# ─────────────────────────────────────────────
+# import sentry_sdk
+# from sentry_sdk.integrations.django import DjangoIntegration
+# from sentry_sdk.integrations.logging import LoggingIntegration
+#
+# SENTRY_DSN = env("SENTRY_DSN", default=None)
+#
+# if not DEBUG and SENTRY_DSN:
+#     sentry_sdk.init(
+#         dsn=SENTRY_DSN,
+#         integrations=[
+#             DjangoIntegration(),
+#             LoggingIntegration(
+#                 level=20,
+#                 event_level=40,
+#             )
+#         ],
+#         traces_sample_rate=0.1,
+#         send_default_pii=False,
+#     )
 
 AIRTEL_MONEY = {
     "BASE_URL": env("AIRTEL_BASE_URL", default=""),
@@ -290,5 +319,8 @@ AIRTEL_MONEY = {
 
 PAUSE_FREE_SECONDS = 5 * 60
 PAUSE_RATE_PER_MIN = 250  # XAF
+RIDE_ACCEPT_TIMEOUT_S = 10      # délai pour que le chauffeur accepte
+RIDE_RETRY_MAX = 3              # nombre maximum de chauffeurs à contacter
+RIDE_MAX_DISTANCE_KM = 30.0     # rayon maximum
 
 

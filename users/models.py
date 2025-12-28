@@ -88,6 +88,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     def get_short_name(self):
         return (self.first_name or self.email).strip()
 
+    def is_driver(self):
+        return str(getattr(self, "user_type", "")).lower() == "chauffeur"
+
 class CustomerProfile(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='profile')
     first_name = models.CharField(max_length=100)

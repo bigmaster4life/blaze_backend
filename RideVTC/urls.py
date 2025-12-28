@@ -5,6 +5,7 @@ from rest_framework.routers import DefaultRouter
 from .views import RideVehicleViewSet, RideViewSet, RateDriverView, RideStatusView, LatestUnratedRideView, DriverMeView, DriverRecentRatingsView, DriverVehicleMe
 from RideVTC.views import MobileInitiate, MobileStatus
 from RideVTC.callbacks import ProviderCallback
+from RideVTC.views import DriverPresenceView
 
 router = DefaultRouter()
 router.register(r'ride-vehicles', RideVehicleViewSet, basename='ridevehicle')
@@ -20,5 +21,6 @@ urlpatterns = [
     path("driver/me/", DriverMeView.as_view(), name="driver-me"),
     path("driver/ratings/recent/", DriverRecentRatingsView.as_view(), name="driver-ratings-recent"),
     path('driver/vehicle/', DriverVehicleMe.as_view(), name='driver-vehicle-me'),
+    path("ridevtc/driver/presence/", DriverPresenceView.as_view(), name="driver-presence"),
 
 ]

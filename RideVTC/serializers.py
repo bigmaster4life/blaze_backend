@@ -51,6 +51,7 @@ class RideCreateSerializer(serializers.Serializer):
         #     raise serializers.ValidationError({
         #         "dropoff": "Coordonnées requises pour un Plus Code (dropoff_lat/dropoff_lng)."
         #     })
+        
 
         return attrs
 
@@ -70,6 +71,10 @@ class RideCreateSerializer(serializers.Serializer):
         # merge d’eventuels kwargs fournis par self.save(**extra)
         if extra:
             validated_data.update(extra)
+
+        cat = validated_data.pop("category", None)
+        if cat:
+            validated_data["category"] = cat
 
         # si ton modèle Ride a un default pour status/accepted_at/completed_at, tu peux les omettre
         return Ride.objects.create(user=user, **validated_data)
@@ -102,8 +107,9 @@ class DriverVehicleMeSerializer(serializers.ModelSerializer):
     class Meta:
         model = RideVehicle
         fields = [
-            'brand', 'model', 'plate', 'color', 'year',
+            'id','brand', 'model', 'plate', 'color', 'year',
             'insurance_valid_until', 'technical_valid_until',
+            'category', 'city', 'latitude', 'longitude','available',
         ]
 class DriverNavEventSerializer(serializers.ModelSerializer):
     class Meta:
