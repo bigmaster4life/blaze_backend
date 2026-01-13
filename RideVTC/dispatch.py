@@ -1,5 +1,3 @@
-# RideVTC/dispatch.py
-
 import math
 import random
 import logging
@@ -7,7 +5,6 @@ from typing import Iterable, List, Optional, Set
 
 from django.utils import timezone
 from django.conf import settings
-from django.db import transaction
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -165,7 +162,18 @@ def _find_top_candidates(
     return ordered[:3]
 
 
+# =====================================================================
+# PAYLOAD BOOST-READY (COMPATIBLE)
+# =====================================================================
 def _build_ride_payload(ride: Ride) -> dict:
+    base_price = getattr(ride, "price", None)
+    boost_amount = int(getattr(ride, "boost_amount", 0) or 0)
+
+    try:
+        effective_price = int(base_price or 0) + boost_amount
+    except Exception:
+        effective_price = base_price
+
     return {
         "id": ride.id,
         "category": getattr(ride, "category", "eco"),
@@ -180,23 +188,32 @@ def _build_ride_payload(ride: Ride) -> dict:
             "lng": getattr(ride, "dropoff_lng", None),
         },
         "distance_km": getattr(ride, "distance_km", None),
-        "price": str(getattr(ride, "price", "")),
+
+        "base_price": str(base_price) if base_price is not None else None,
+        "boost_amount": boost_amount,
+        "price": str(effective_price),
+        "price_text": f"{int(effective_price)} FCFA" if effective_price else "",
+
         "pickup_label": getattr(ride, "pickup_location", None),
         "dropoff_label": getattr(ride, "dropoff_location", None),
-        "price_text": (
-            f"{int(ride.price)} FCFA" if getattr(ride, "price", None) else ""
-        ),
+
         "status": getattr(ride, "status", "pending"),
+        "dispatch_status": getattr(ride, "dispatch_status", "searching"),
+        "dispatch_attempt": int(getattr(ride, "dispatch_attempt", 0) or 0),
+        "max_radius_km_used": getattr(ride, "max_radius_km_used", None),
     }
 
 
+# =====================================================================
+# DISPATCH PRINCIPAL
+# =====================================================================
 def dispatch_ride_offer(
     ride_id: int,
     area: str = "city-default",
     preferred_category: Optional[str] = None,
     extra_exclude_driver_ids: Optional[Iterable[int]] = None,
 ) -> bool:
-    
+
     logger.warning("DEBUG DISPATCH START → ride_id=%s area=%s", ride_id, area)
 
     try:
@@ -204,7 +221,7 @@ def dispatch_ride_offer(
     except Ride.DoesNotExist:
         logger.warning("[DISPATCH] ride %s not found", ride_id)
         return False
-    
+
     logger.warning(
         "DEBUG DISPATCH RIDE LOADED → pickup_lat=%s pickup_lng=%s category=%s",
         ride.pickup_lat,
@@ -229,23 +246,44 @@ def dispatch_ride_offer(
 
     cat_sequence = _category_fallbacks(preferred_category or getattr(ride, "category", "eco"))
 
+    radii = [10, 15, 25, 30]
+
     candidates = []
     used_category = None
+    used_radius = None
 
-    for cat in cat_sequence:
-        cands = _find_top_candidates(
-            ride=ride,
-            category=cat,
-            max_km=float(getattr(settings, "RIDE_MAX_DISTANCE_KM", 10.0)),
-            exclude_driver_ids=exclude_ids,
-        )
-        if cands:
-            candidates = cands
-            used_category = cat
+    logger.warning(
+        "[DISPATCH] ride_id=%s area=%s preferred_category=%s cat_sequence=%s radii=%s exclude_count=%s",
+        ride.id, area, preferred_category, cat_sequence, radii, len(exclude_ids)
+    )
+
+    for r_km in radii:
+        for cat in cat_sequence:
+            cands = _find_top_candidates(
+                ride=ride,
+                category=cat,
+                max_km=r_km,
+                exclude_driver_ids=exclude_ids,
+            )
+            if cands:
+                candidates = cands
+                used_category = cat
+                used_radius = r_km
+                break
+        if candidates:
             break
 
     if not candidates:
-        logger.info("[DISPATCH] ride %s → no candidate drivers found (area=%s)", ride.id, area)
+        logger.info("[DISPATCH] ride %s → no candidates after radii %s", ride.id, radii)
+
+        try:
+            ride.dispatch_status = "need_boost"
+            ride.dispatch_attempt = int(getattr(ride, "dispatch_attempt", 0) or 0) + 1
+            ride.max_radius_km_used = radii[-1]
+            ride.save(update_fields=["dispatch_status", "dispatch_attempt", "max_radius_km_used"])
+        except Exception:
+            logger.exception("[DISPATCH] failed to update ride need_boost")
+
         return False
 
     target_driver_id = candidates[0]
@@ -254,6 +292,13 @@ def dispatch_ride_offer(
     if not ch_layer:
         logger.warning("[DISPATCH] no channel_layer → cannot WS dispatch")
         return False
+
+    try:
+        ride.dispatch_status = "dispatched"
+        ride.max_radius_km_used = used_radius
+        ride.save(update_fields=["dispatch_status", "max_radius_km_used"])
+    except Exception:
+        logger.exception("[DISPATCH] failed to update dispatch state")
 
     ride_payload = _build_ride_payload(ride)
     if used_category:
@@ -266,7 +311,10 @@ def dispatch_ride_offer(
 
     try:
         async_to_sync(ch_layer.group_send)(driver_room(target_driver_id), message)
-        logger.info("[DISPATCH] ride %s → sent to driver.%s (cat=%s, area=%s)", ride.id, target_driver_id, used_category, area)
+        logger.info(
+            "[DISPATCH] ride %s → sent to driver.%s (cat=%s, radius=%s, area=%s)",
+            ride.id, target_driver_id, used_category, used_radius, area
+        )
         return True
     except Exception as e:
         logger.exception("[DISPATCH] WS send failed for ride %s → driver.%s : %s", ride.id, target_driver_id, e)

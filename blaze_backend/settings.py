@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django_extensions',
     'rest_framework',
     'rest_framework.authtoken',
     'corsheaders',
@@ -322,5 +323,6 @@ PAUSE_RATE_PER_MIN = 250  # XAF
 RIDE_ACCEPT_TIMEOUT_S = 10      # délai pour que le chauffeur accepte
 RIDE_RETRY_MAX = 3              # nombre maximum de chauffeurs à contacter
 RIDE_MAX_DISTANCE_KM = 30.0     # rayon maximum
+DRIVER_PRESENCE_TIMEOUT_S = 120  # délai avant de considérer un chauffeur offline
 
 

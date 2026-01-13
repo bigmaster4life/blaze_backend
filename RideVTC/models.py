@@ -98,6 +98,20 @@ class Ride(models.Model):
     customer_comment = models.TextField(null=True, blank=True)
     rated_at = models.DateTimeField(null=True, blank=True)
     pickup_city = models.CharField(max_length=64, blank=True, null=True, default="")
+    boost_amount = models.PositiveIntegerField(default=0)
+    dispatch_status = models.CharField(
+        max_length=24,
+        default="searching",
+        choices=[
+            ("searching", "searching"),
+            ("need_boost", "need_boost"),
+            ("dispatched", "dispatched"),
+            ("accepted", "accepted"),
+            ("cancelled", "cancelled"),
+        ],
+    )
+    dispatch_attempt = models.PositiveSmallIntegerField(default=0)
+    max_radius_km_used = models.FloatField(null=True, blank=True)
 
     def __str__(self):
         return f"Course #{self.id} - {self.user.email} ➡ {self.dropoff_location}"
@@ -182,6 +196,8 @@ class DriverPresence(models.Model):
     city = models.CharField(max_length=50, default="", blank=True)
     is_online = models.BooleanField(default=False)
     last_seen = models.DateTimeField(null=True, blank=True)
+    lat = models.FloatField(null=True, blank=True)
+    lng = models.FloatField(null=True, blank=True)
 
     def __str__(self):
         return f"Presence(driver={self.driver_id}, online={self.is_online}, last_seen={self.last_seen})"

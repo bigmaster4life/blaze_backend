@@ -1029,6 +1029,64 @@ class RideViewSet(viewsets.ModelViewSet):
         return Response({"ok": True, "redispatched": True})
         raw_category = driver_category or "eco"
 
+    @transaction.atomic
+    @action(detail=True, methods=["post"], url_path="boost")
+    def boost(self, request, pk=None):
+        """
+        Client accepte un boost pour relancer le dispatch.
+        Body: { "boost_amount": 500 }
+        """
+        ride = get_object_or_404(Ride.objects.select_for_update(), pk=pk)
+
+        # Sécurité : seul le client
+        if ride.user_id != request.user.id:
+            return Response({"detail": "Forbidden"}, status=403)
+
+        if ride.status != "pending":
+            return Response({"detail": f"Cannot boost ride in status '{ride.status}'"}, status=409)
+
+        boost_amount = int(request.data.get("boost_amount", 0))
+        if boost_amount <= 0:
+            return Response({"detail": "Invalid boost_amount"}, status=400)
+
+        # Anti-spam
+        max_attempts = int(getattr(settings, "RIDE_MAX_BOOST_ATTEMPTS", 3))
+        if ride.dispatch_attempt >= max_attempts:
+            return Response(
+                {
+                    "detail": "Max boost attempts reached",
+                    "dispatch_attempt": ride.dispatch_attempt,
+                },
+                status=409,
+            )
+
+        # Appliquer boost
+        ride.boost_amount = boost_amount
+        ride.dispatch_status = "searching"
+        ride.dispatch_attempt = (ride.dispatch_attempt or 0) + 1
+        ride.save(update_fields=["boost_amount", "dispatch_status", "dispatch_attempt"])
+
+        # Relancer dispatch après commit
+        area = "city-default"
+        preferred_category = ride.category or "eco"
+
+        if channel_layer:
+            transaction.on_commit(
+                lambda: dispatch_ride_offer(
+                    ride_id=ride.id,
+                    area=area,
+                    preferred_category=preferred_category,
+                )
+            )
+
+        return Response({
+            "ok": True,
+            "ride_id": ride.id,
+            "boost_amount": ride.boost_amount,
+            "dispatch_status": ride.dispatch_status,
+            "dispatch_attempt": ride.dispatch_attempt,
+        }, status=200)
+
 
 
 class IsRideParticipant(permissions.BasePermission):

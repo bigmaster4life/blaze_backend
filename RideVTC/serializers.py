@@ -30,6 +30,7 @@ class RideCreateSerializer(serializers.Serializer):
     # donnés “hors modèle”
     area = serializers.CharField(required=False, allow_blank=True)
     category = serializers.ChoiceField(choices=[('eco','eco'),('clim','clim'),('vip','vip')], required=False)
+    pickup_city = serializers.CharField(required=False, allow_blank=True)
 
     def validate(self, attrs):
         pickup_label = (attrs.get("pickup_location") or "").strip()
