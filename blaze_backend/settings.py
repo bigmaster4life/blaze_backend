@@ -23,6 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 ENV_FILE = os.getenv("ENV_FILE", ".env")
 env = environ.Env()
 environ.Env.read_env(os.path.join(BASE_DIR, ENV_FILE))
+FCM_SERVER_KEY = env("FCM_SERVER_KEY", default="")
 
 
 
@@ -36,11 +37,9 @@ SECRET_KEY = env("SECRET_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env.bool("DEBUG", default=False)
 
-GOOGLE_KEY = env("PLACES_DIRECTIONS_KEY")
-
 ALLOWED_HOSTS = env.list(
     "ALLOWED_HOSTS",
-    default=["localhost", "127.0.0.1", "192.168.1.161", "10.0.2.2", "0.0.0.0", "be.blazepro.org", "51.210.177.126"],
+    default=["localhost", "127.0.0.1", "192.168.1.161", "10.0.2.2", "0.0.0.0", "be.blazepro.org", "51.210.177.126", 'api-preprod.blazepro.org', "api.blazepro.org"],
 )
 
 
@@ -65,6 +64,7 @@ INSTALLED_APPS = [
     'mapsproxy',
     'analytics',
     'notifications.apps.NotificationsConfig',
+    'Delivery',
 ]
 
 ASGI_APPLICATION = 'blaze_backend.asgi.application'
@@ -192,12 +192,26 @@ AUTHENTICATION_BACKENDS = [
     'django.contrib.auth.backends.ModelBackend',
 ]
 
+CORS_ALLOW_ALL_ORIGINS = True
+
+CORS_ALLOW_METHODS = [
+    "DELETE",
+    "GET",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PUT",
+]
+
 CORS_ALLOWED_ORIGINS = env.list(
     "CORS_ALLOWED_ORIGINS",
     default=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://192.168.1.161:3000",
+        "https://blaze-frontend-indol.vercel.app",
+        "https://be.blazepro.org",
+        "https://blazepro.org",
     ],
 )
 
@@ -221,12 +235,15 @@ CSRF_TRUSTED_ORIGINS = env.list(
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://192.168.1.161:3000",
+        "https://blaze-frontend-indol.vercel.app",
+        "https://be.blazepro.org",
     ],
 )
 
 
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    USE_X_FORWARDED_HOST = True
     SECURE_SSL_REDIRECT = env.bool("SECURE_SSL_REDIRECT", default=True)
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
@@ -237,7 +254,7 @@ if not DEBUG:
     SECURE_HSTS_PRELOAD = True
 
 # Adresse expéditeur par défaut
-DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "no-reply@blaze.app")
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="Blaze <bigmaster4life@gmail.com>")
 
 if DEBUG:
     # DEV: aucun envoi, les emails s'affichent dans la console du serveur
@@ -245,17 +262,17 @@ if DEBUG:
 else:
     # PROD: envoi via SMTP (configurable par variables d'environnement)
     EMAIL_BACKEND = env("EMAIL_BACKEND", default="django.core.mail.backends.smtp.EmailBackend")
-    EMAIL_HOST = env("EMAIL_HOST", default="smtp.example.com")
+    EMAIL_HOST = env("EMAIL_HOST", default="smtp.gmail.com")
     EMAIL_PORT = env.int("EMAIL_PORT", default=587)
-    EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="no-reply@blaze.app")
-    EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="changeme")
+    EMAIL_HOST_USER = env("EMAIL_HOST_USER")
+    EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD")
 
     # Généralement: TLS=True sur port 587 ; SSL=False
     EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
     EMAIL_USE_SSL = env.bool("EMAIL_USE_SSL", default=False)
 
     SERVER_EMAIL = env("SERVER_EMAIL", default=DEFAULT_FROM_EMAIL)
-    ADMINS = [("Tech", env("ADMIN_EMAIL", default="ops@blazepro.org"))]
+    ADMINS = [("Tech", env("ADMIN_EMAIL", default="bigmaster4life@gmail.com"))]
 
 
 # ─────────────────────────────────────────────
@@ -265,9 +282,16 @@ LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "handlers": {
+        "null": {
+            "class": "logging.NullHandler",
+        },
         "console": {"class": "logging.StreamHandler"},
     },
     "loggers": {
+        "django.security.DisallowedHost": {
+            "handlers": ["null"],
+            "propagate": False,
+        },
         # Ton app VTC
         "rides": {"handlers": ["console"], "level": "INFO"},
         # Channels WS

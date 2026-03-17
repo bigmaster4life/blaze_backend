@@ -255,6 +255,19 @@ class AppConsumer(AsyncJsonWebsocketConsumer):
             )
         except Exception as e:
             logger.exception("AppConsumer ride.chat → user_room failed: %s", e)
+        
+        # 3️⃣ push notif au chauffeur (si app fermée / veille)
+        try:
+            from notifications.fcm import notify_chat_message
+            await database_sync_to_async(notify_chat_message)(
+                driver_id,
+                "Nouveau message de votre client",
+                text[:120],
+                ride_id,
+                "customer",
+            )
+        except Exception as e:
+            logger.warning("notify_chat_message(chat->driver) failed: %s", e)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -594,20 +607,17 @@ class DriverConsumer(AsyncJsonWebsocketConsumer):
             logger.exception("DriverConsumer ride.chat → driver_room failed: %s", e)
 
         # 3️⃣ (optionnel) push notif au client
-        if notify_user:
-            try:
-                await database_sync_to_async(notify_user)(
-                    user_id,
-                    title="Nouveau message de votre chauffeur",
-                    body=text[:120],
-                    data={
-                        "type": "ride.chat",
-                        "ride_id": ride_id,
-                        "from": "driver",
-                    },
-                )
-            except Exception as e:
-                logger.warning("notify_user(chat) failed: %s", e)
+        try:
+            from notifications.fcm import notify_chat_message
+            await database_sync_to_async(notify_chat_message)(
+                user_id,
+                "Nouveau message de votre chauffeur",
+                text[:120],
+                ride_id,
+                "driver",
+            )
+        except Exception as e:
+            logger.warning("notify_user(chat) failed: %s", e)
 
     async def ride_requested(self, event):
         """Reçoit depuis la vue (create) et pousse au chauffeur."""

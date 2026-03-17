@@ -11,6 +11,8 @@ from channels.layers import get_channel_layer
 
 from .models import Ride, RideVehicle, DriverPresence, DriverStats, DriverNavEvent
 from .utils.rooms import driver_room
+from notifications.fcm import notify_driver_new_ride
+from django.contrib.auth import get_user_model
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +77,10 @@ def _find_top_candidates(
     exclude_set = set(exclude_driver_ids or [])
 
     # 1) CHAUFFEURS EN LIGNE
-    online_ids = _get_online_driver_ids(
-        timeout_s=int(getattr(settings, "DRIVER_PRESENCE_TIMEOUT_S", 30))
+    online_ids = set(
+        RideVehicle.objects.filter(
+            available=True
+        ).values_list("driver_id", flat=True)
     )
     logger.info(f"[DISPATCH][DEBUG] STEP 1: drivers online = {len(online_ids)} → {online_ids}")
 
@@ -311,6 +315,18 @@ def dispatch_ride_offer(
 
     try:
         async_to_sync(ch_layer.group_send)(driver_room(target_driver_id), message)
+
+        logger.warning(
+            "DEBUG FCM CALL → driver=%s ride=%s",
+            target_driver_id,
+            ride.id
+        )
+
+        # 🔔 FCM notification (app fermée / veille)
+        User = get_user_model()
+        driver_user = User.objects.filter(id=target_driver_id).first()
+        if driver_user:
+            notify_driver_new_ride(driver_user, ride.id)
         logger.info(
             "[DISPATCH] ride %s → sent to driver.%s (cat=%s, radius=%s, area=%s)",
             ride.id, target_driver_id, used_category, used_radius, area

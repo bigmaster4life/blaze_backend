@@ -11,7 +11,8 @@ from .serializers import (
     DriverLocationSerializer,
     RateDriverSerializer,
     DriverVehicleMeSerializer,
-    DriverNavEventSerializer
+    DriverNavEventSerializer,
+    OperatorRideSerializer,
 )
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db import transaction
@@ -1086,6 +1087,41 @@ class RideViewSet(viewsets.ModelViewSet):
             "dispatch_status": ride.dispatch_status,
             "dispatch_attempt": ride.dispatch_attempt,
         }, status=200)
+
+    @action(detail=False, methods=["get"], url_path="operator-queue", permission_classes=[permissions.IsAdminUser])
+    def operator_queue(self, request):
+        """
+        Courses visibles par l’opérateur :
+        - pending : en attente de chauffeur
+        - accepted : chauffeur trouvé, course pas encore démarrée
+        - in_progress : course en cours
+        """
+        qs = (
+            Ride.objects
+            .select_related("user", "driver")
+            .filter(status__in=["pending", "accepted", "in_progress"])
+            .order_by("-id")
+        )
+
+        serializer = OperatorRideSerializer(qs, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["get"], url_path="operator-stats", permission_classes=[permissions.IsAdminUser])
+    def operator_stats(self, request):
+        pending_count = Ride.objects.filter(status="pending").count()
+        accepted_count = Ride.objects.filter(status="accepted").count()
+        in_progress_count = Ride.objects.filter(status="in_progress").count()
+        cancelled_count = Ride.objects.filter(status="cancelled").count()
+        completed_count = Ride.objects.filter(status="completed").count()
+
+        return Response({
+            "pending_count": pending_count,
+            "accepted_count": accepted_count,
+            "in_progress_count": in_progress_count,
+            "cancelled_count": cancelled_count,
+            "completed_count": completed_count,
+            "active_count": accepted_count + in_progress_count,
+        }, status=status.HTTP_200_OK)
 
 
 

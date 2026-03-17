@@ -27,6 +27,7 @@ from rest_framework_simplejwt.tokens import AccessToken
 # Conserver les routes existantes (BlazeMobile) + celles d’Analytics
 import RideVTC.routing
 import analytics.routing
+import Delivery.routing
 
 User = get_user_model()
 
@@ -68,6 +69,7 @@ def QueryAuthStack(inner):
 all_ws_patterns = []
 all_ws_patterns += getattr(RideVTC.routing, "websocket_urlpatterns", [])
 all_ws_patterns += getattr(analytics.routing, "websocket_urlpatterns", [])
+all_ws_patterns += getattr(Delivery.routing, "websocket_urlpatterns", [])
 
 application = ProtocolTypeRouter({
     "http": django_asgi_app,

@@ -27,6 +27,7 @@ class Driver(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
 
     full_name = models.CharField(max_length=100)
+    fcm_token = models.CharField(max_length=255, blank=True, null=True)
     email = models.EmailField(default='default_driver@example.com')
     phone = models.CharField(max_length=20)
     vehicle_plate = models.CharField(max_length=20)

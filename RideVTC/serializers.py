@@ -117,3 +117,45 @@ class DriverNavEventSerializer(serializers.ModelSerializer):
         model = DriverNavEvent
         fields = "__all__"
         read_only_fields = ("driver", "created_at")
+
+class OperatorRideSerializer(serializers.ModelSerializer):
+    customer_name = serializers.SerializerMethodField()
+    customer_phone = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Ride
+        fields = [
+            "id",
+            "status",
+            "category",
+            "price",
+            "final_price",
+            "pickup_location",
+            "dropoff_location",
+            "pickup_lat",
+            "pickup_lng",
+            "dropoff_lat",
+            "dropoff_lng",
+            "created_at",
+            "driver_id",
+            "user_id",
+            "customer_name",
+            "customer_phone",
+        ]
+
+    def get_customer_name(self, obj):
+        user = getattr(obj, "user", None)
+        if not user:
+            return None
+
+        full_name = f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
+        if full_name:
+            return full_name
+
+        return getattr(user, "email", None)
+
+    def get_customer_phone(self, obj):
+        user = getattr(obj, "user", None)
+        if not user:
+            return None
+        return getattr(user, "phone_number", None)

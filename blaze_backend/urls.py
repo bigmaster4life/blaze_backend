@@ -62,6 +62,7 @@ urlpatterns = [
     path('api/rides/<int:pk>/location/', ride_location, name='ride-location'),
 
     path('api/', include('RideVTC.urls')),
+    path("api/", include("Delivery.urls")),
     path("api/notifications/", include("notifications.urls")),
 
     # (facultatif) tu peux garder aussi ta route “drivers location” si tu veux
