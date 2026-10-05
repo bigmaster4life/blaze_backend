@@ -56,6 +56,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     first_name = models.CharField(max_length=100, blank=True, default='')
     last_name = models.CharField(max_length=100, blank=True, default='')
 
+    email_verified = models.BooleanField(default=False)
+
     fcm_token = models.CharField(max_length=255, blank=True, null=True)
     
     is_active = models.BooleanField(default=True)
@@ -125,3 +127,15 @@ class EmailOTP(models.Model):
 
     def __str__(self):
         return f"{self.email} - {self.otp}"
+
+class EmailChallenge(models.Model):
+    phone_number = models.CharField(max_length=20)
+    email = models.EmailField()
+    purpose = models.CharField(max_length=16)
+    code_digest = models.CharField(max_length=64)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["phone_number", "purpose"], name="unique_email_challenge")]

@@ -286,48 +286,9 @@ class PhoneOTPVerifySerializer(serializers.Serializer):
 class EmailOTPRequestSerializer(serializers.Serializer):
     phone_number = serializers.CharField()
     email = serializers.EmailField()
-
-    def validate(self, attrs):
-        from .utils import normalize_phone_gabon
-
-        email = attrs.get("email", "").strip().lower()
-        phone = normalize_phone_gabon(attrs.get("phone_number"))
-
-        if not phone:
-            raise serializers.ValidationError({"phone_number": "Numéro invalide."})
-
-        attrs["email"] = email
-        attrs["phone_number"] = phone
-        return attrs
+    purpose = serializers.ChoiceField(choices=["signup", "reset"], default="signup")
 
     def create(self, validated_data):
-        from django.core.mail import send_mail
-        from django.conf import settings
-
-        phone = validated_data["phone_number"]
-        email = validated_data["email"]
-
-        # 🔥 Génère le même OTP que pour SMS (Option 1 : OTP unique)
-        otp = f"{random.randint(0, 999999):06d}"
-
-        # 🔥 Stocke EXACTEMENT à la même clé que l'envoi SMS
-        cache.set(f"otp:{phone}", otp, timeout=300)
-
-        subject = "Votre code Blaze"
-        message = (
-            f"Votre code OTP est : {otp}\n"
-            f"Il est valable 5 minutes.\n\n"
-            "— Équipe Blaze"
-        )
-        from_email = getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@blaze.com")
-
-        # Envoi email
-        send_mail(subject, message, from_email, [email], fail_silently=False)
-
-        return {
-            "phone_number": phone,
-            "email": email,
-            "expires_in": 300,
-            # Ne renvoie jamais l’OTP en prod
-            "otp": otp if settings.DEBUG else "SENT",
-        }
+        from .email_otp import issue_code
+        issue_code(validated_data["phone_number"], validated_data["email"], validated_data["purpose"])
+        return {"expires_in": 300}

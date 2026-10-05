@@ -5,8 +5,8 @@ from rest_framework.decorators import action
 from .serializers import (
     RegisterSerializer, UserSerializer, CustomerProfileSerializer, PhoneLoginSerializer, PhoneOTPRequestSerializer, PhoneOTPVerifySerializer
 )
-from rest_framework import status, viewsets, permissions
-from .models import CustomUser, CustomerProfile, EmailOTP
+from rest_framework import status, viewsets, permissions, serializers
+from .models import CustomUser, CustomerProfile
 from django.contrib.auth import authenticate
 from rest_framework.authtoken.models import Token
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -186,7 +186,6 @@ class PhoneLoginView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        print("DEBUG /login-phone payload ->", request.data)
         ser = PhoneLoginSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         data = ser.save()  # retourne tokens + user
@@ -211,45 +210,48 @@ class VerifyOTPView(APIView):
         data = ser.save()  # tokens + user + is_new_user
         return Response(data, status=status.HTTP_200_OK)
     
-class VerifyOTPEmailView(APIView):
+class VerifySignupEmailView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
     def post(self, request):
-        email = request.data.get("email")
-        otp = request.data.get("otp")
+        from .email_otp import complete_code
+        from .serializers import build_auth_payload
+        ser = EmailVerificationSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        user = complete_code(purpose="signup", **ser.validated_data)
+        data = build_auth_payload(user)
+        data.update({"is_new_user": True, "must_change_password": True})
+        return Response(data)
 
-        if not email or not otp:
-            return Response({"detail": "Email ou code manquant."},
-                            status=status.HTTP_400_BAD_REQUEST)
 
+class EmailVerificationSerializer(serializers.Serializer):
+    phone = serializers.CharField(source="phone_number")
+    email = serializers.EmailField()
+    code = serializers.RegexField(r"^\d{6}$")
+
+
+class VerifyOTPEmailView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        from .email_otp import complete_code
+        ser = EmailVerificationSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        password = request.data.get("new_password", "")
+        confirmation = request.data.get("confirm_password", "")
+        if not isinstance(password, str) or not password or password != confirmation:
+            return Response({"detail": "Mot de passe et confirmation requis et identiques."}, status=400)
+        candidate = CustomUser.objects.filter(phone_number=normalize_phone_gabon(ser.validated_data["phone_number"])).first()
         try:
-            otp_obj = EmailOTP.objects.get(email=email, otp=otp)
-        except EmailOTP.DoesNotExist:
-            return Response({"detail": "Code OTP invalide."},
-                            status=status.HTTP_400_BAD_REQUEST)
+            validate_password(password, user=candidate)
+        except DjangoValidationError as exc:
+            return Response({"detail": list(exc.messages)}, status=400)
+        complete_code(purpose="reset", new_password=password, **ser.validated_data)
+        return Response({"ok": True})
 
-        if otp_obj.expires_at < timezone.now():
-            return Response({"detail": "Code expiré."},
-                            status=status.HTTP_400_BAD_REQUEST)
 
-        # récupérer l'utilisateur
-        try:
-            user = User.objects.get(email=email)
-        except User.DoesNotExist:
-            return Response({"detail": "Utilisateur introuvable"},
-                            status=status.HTTP_404_NOT_FOUND)
-
-        # supprimer OTP pour éviter réutilisation
-        otp_obj.delete()
-
-        # créer un token JWT temporaire
-        refresh = RefreshToken.for_user(user)
-        access = str(refresh.access_token)
-
-        return Response({
-            "access": access,
-            "refresh": str(refresh),
-            "user_id": user.id
-        })
-    
 class SetPasswordView(APIView):
     permission_classes = [IsAuthenticated]
 
