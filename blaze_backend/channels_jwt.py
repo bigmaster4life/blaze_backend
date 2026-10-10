@@ -13,8 +13,13 @@ def get_user_for_token(token: str):
 
 class JwtAuthMiddleware(BaseMiddleware):
     async def __call__(self, scope, receive, send):
-        query = parse_qs(scope.get("query_string", b"").decode())
+        scope = dict(scope)
+        query = parse_qs(scope.get("query_string", b"").decode(errors="replace"))
         token = (query.get("token") or [None])[0]
+        headers = dict(scope.get("headers", []))
+        authorization = headers.get(b"authorization", b"").decode(errors="replace")
+        if authorization:
+            token = authorization[7:] if authorization.startswith("Bearer ") else "invalid"
         scope["user"] = AnonymousUser()
         if token:
             try:

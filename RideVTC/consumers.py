@@ -6,6 +6,8 @@ from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from channels.db import database_sync_to_async
 from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
+from django.db import transaction
+from blaze_backend.ws_permissions import authentication_error, driver_allowed
 
 from .models import Ride
 from .utils.rooms import user_room, driver_room, pool_room
@@ -105,12 +107,19 @@ class AppConsumer(AsyncJsonWebsocketConsumer):
 
         user = self.scope.get("user", AnonymousUser())
 
-        if role in ("client", "customer"):
-            user_id = getattr(user, "id", None) or int(qs.get("user_id", ["0"])[0])
-            if user_id:
-                g = f"user.{user_id}"  # ⚠️ point, pas deux-points
-                self.groups_to_join.append(g)
-                logger.info("[WS][App] customer join group=%s", g)
+        error = authentication_error(user)
+        if error:
+            await self.close(code=error)
+            return
+        if role != "customer":
+            await self.close(code=4403)
+            return
+        requested_id = (qs.get("user_id") or [str(user.pk)])[0]
+        if requested_id != str(user.pk):
+            await self.close(code=4403)
+            return
+        self.user_id = user.pk
+        self.groups_to_join.append(f"user.{user.pk}")
 
         # On n’abonne pas les chauffeurs ici (ils passent par DriverConsumer)
         for g in self.groups_to_join:
@@ -214,6 +223,9 @@ class AppConsumer(AsyncJsonWebsocketConsumer):
 
         user_id = partners.get("user_id")
         driver_id = partners.get("driver_id")
+        if user_id != self.user_id:
+            await self.send_json({"type": "error", "message": "not customer of this ride"})
+            return
 
         if not user_id or not driver_id:
             await self.send_json({
@@ -279,6 +291,7 @@ CURRENT_DRIVER_SOCKETS: dict[str, str] = {}
 
 class DriverConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
+        self.user_id = None
         # Param path : ⚠️ on considère maintenant que <driver_id> = user.id
         try:
             self.user_id = int(self.scope["url_route"]["kwargs"].get("driver_id"))
@@ -289,6 +302,14 @@ class DriverConsumer(AsyncJsonWebsocketConsumer):
         
         user = self.scope.get("user", AnonymousUser())
         auth_id = getattr(user, "id", None)
+        error = authentication_error(user, self.user_id)
+        if error:
+            await self.close(code=error)
+            return
+        if not await driver_allowed(self.user_id):
+            await self.close(code=4403)
+            return
+
 
         logger.info(
             "[WS] driver CONNECT path_id=%s auth_id=%s channel=%s",
@@ -558,7 +579,7 @@ class DriverConsumer(AsyncJsonWebsocketConsumer):
 
         # sécurité minimale : si la course a déjà un driver_id,
         # on vérifie que c’est bien cette socket qui parle
-        if partners.get("driver_id") and int(partners["driver_id"]) != int(self.user_id):
+        if partners.get("driver_id") != self.user_id:
             await self.send_json({"type": "error", "message": "not driver of this ride"})
             return
 
@@ -665,6 +686,7 @@ class DriverConsumer(AsyncJsonWebsocketConsumer):
         }
 
     @database_sync_to_async
+    @transaction.atomic
     def _mark_arrived_and_get_payload(self, ride_id: int, lat: float, lng: float, source: str):
         if not ride_id:
             return False, "ride_id missing"
@@ -672,6 +694,9 @@ class DriverConsumer(AsyncJsonWebsocketConsumer):
             r = Ride.objects.select_for_update().get(id=ride_id)
         except Ride.DoesNotExist:
             return False, "Ride not found"
+
+        if r.driver_id != self.user_id:
+            return False, "not driver of this ride"
 
         if hasattr(r, "arrived_at") and not r.arrived_at:
             r.arrived_at = timezone.now()

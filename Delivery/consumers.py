@@ -4,6 +4,7 @@ import logging
 
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from django.contrib.auth.models import AnonymousUser
+from blaze_backend.ws_permissions import authentication_error, driver_allowed
 
 from Delivery.utils.rooms import delivery_driver_room, delivery_pool_room
 
@@ -13,6 +14,7 @@ CURRENT_DELIVERY_DRIVER_SOCKETS: dict[str, str] = {}
 
 class DeliveryDriverConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
+        self.user_id = None
         # on considère driver_id = user.id (comme RideVTC)
         try:
             self.user_id = int(self.scope["url_route"]["kwargs"].get("driver_id"))
@@ -22,6 +24,14 @@ class DeliveryDriverConsumer(AsyncJsonWebsocketConsumer):
 
         user = self.scope.get("user", AnonymousUser())
         auth_id = getattr(user, "id", None)
+        error = authentication_error(user, self.user_id)
+        if error:
+            await self.close(code=error)
+            return
+        if not await driver_allowed(self.user_id, delivery=True):
+            await self.close(code=4403)
+            return
+
 
         q = parse_qs(self.scope.get("query_string", b"").decode())
         city = (q.get("city", [""])[0] or "").strip()
@@ -97,10 +107,16 @@ class DeliveryDriverConsumer(AsyncJsonWebsocketConsumer):
 
 class DeliveryClientConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
+        self.user_id = None
         try:
             self.user_id = int(self.scope["url_route"]["kwargs"]["user_id"])
         except Exception:
             await self.close()
+            return
+
+        error = authentication_error(self.scope.get("user"), self.user_id)
+        if error:
+            await self.close(code=error)
             return
 
         self.group_user = f"delivery.user.{self.user_id}"
