@@ -7,11 +7,14 @@ from RideVTC.views import MobileInitiate, MobileStatus
 from RideVTC.callbacks import ProviderCallback
 from RideVTC.views import DriverPresenceView
 
+from .history import RideHistoryView
+
 router = DefaultRouter()
 router.register(r'ride-vehicles', RideVehicleViewSet, basename='ridevehicle')
 router.register(r"rides", RideViewSet, basename="rides")
 
 urlpatterns = [
+    path("rides/history/", RideHistoryView.as_view(), name="ride-history"),
     path('', include(router.urls)),
     path("payments/mobile/initiate/", MobileInitiate.as_view(), name="mobile-init"),
     path("payments/mobile/status/", MobileStatus.as_view(), name="mobile-status"),
