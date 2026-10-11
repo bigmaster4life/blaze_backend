@@ -1,7 +1,10 @@
 # RideVTC/serializers.py
 
 from rest_framework import serializers
-from .models import RideVehicle, Ride, DriverNavEvent
+from .models import RideVehicle, Ride, DriverNavEvent, RidePricing
+from .pricing import read_quote
+from django.conf import settings
+from django.db import transaction
 import re
 
 PLUSCODE_RX = re.compile(r"^[23456789CFGHJMPQRVWX]+\+[\dA-Z]{2,}.*$", re.IGNORECASE)
@@ -27,6 +30,7 @@ class RideCreateSerializer(serializers.Serializer):
     dropoff_lng = serializers.FloatField(required=False)
     distance_km = serializers.FloatField()
     price = serializers.DecimalField(max_digits=10, decimal_places=2)
+    quote_token = serializers.CharField(required=False, write_only=True)
     # donnés “hors modèle”
     area = serializers.CharField(required=False, allow_blank=True)
     category = serializers.ChoiceField(choices=[('eco','eco'),('clim','clim'),('vip','vip')], required=False)
@@ -54,12 +58,22 @@ class RideCreateSerializer(serializers.Serializer):
         #     })
         
 
+        token = attrs.get("quote_token")
+        if getattr(settings, "VTC_REQUIRE_QUOTE", False) and not token:
+            raise serializers.ValidationError({"quote_token": "Recalculez le prix avec une application à jour."})
+        if token:
+            user = self.context["request"].user
+            quote = read_quote(token, user.pk, attrs)
+            attrs["price"] = quote["price"]
+            attrs["distance_km"] = quote["distance_km"]
+            self.quote = quote
         return attrs
 
+    @transaction.atomic
     def create(self, validated_data, **extra):
         """
         Crée et retourne un Ride à partir des données validées.
-        On enlève les clés qui n’existent pas dans le modèle (area/category).
+        On enlève les clés hors modèle (area/quote_token), en conservant category.
         On accepte aussi d’éventuels kwargs passés par .save(...)
         """
         request = self.context.get("request")
@@ -67,7 +81,7 @@ class RideCreateSerializer(serializers.Serializer):
 
         # clés non présentes dans le modèle
         validated_data.pop("area", None)
-        validated_data.pop("category", None)
+        validated_data.pop("quote_token", None)
 
         # merge d’eventuels kwargs fournis par self.save(**extra)
         if extra:
@@ -78,7 +92,14 @@ class RideCreateSerializer(serializers.Serializer):
             validated_data["category"] = cat
 
         # si ton modèle Ride a un default pour status/accepted_at/completed_at, tu peux les omettre
-        return Ride.objects.create(user=user, **validated_data)
+        ride = Ride.objects.create(user=user, **validated_data)
+        quote = getattr(self, "quote", None)
+        if quote:
+            RidePricing.objects.create(ride=ride, version=quote["pricing_version"],
+                reference_price=quote["price"], commission_rate=quote["commission_rate"],
+                quoted_distance_km=quote["distance_km"],
+                quoted_duration_seconds=quote["duration_seconds"])
+        return ride
 
 
 class RideSerializer(serializers.ModelSerializer):

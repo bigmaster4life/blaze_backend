@@ -1207,8 +1207,16 @@ class MobileInitiate(APIView):
         Lance un paiement Mobile Money (Airtel/Moov/…).
         Body: { request_id, amount, msisdn, currency? }
         """
-        ride = Ride.objects.get(pk=request.data["request_id"], user=request.user)
-        amount = Decimal(request.data["amount"])
+        ride = get_object_or_404(Ride, pk=request.data.get("request_id"), user=request.user)
+        if hasattr(ride, "pricing"):
+            # The signed quote owns the fare; the phone cannot lower the charge.
+            if ride.status != "completed":
+                return Response({"detail": "La course doit être terminée."}, status=409)
+            if _has_success_payment(ride):
+                return Response({"detail": "Cette course est déjà enregistrée comme payée."}, status=409)
+            amount = Decimal(ride.final_price if ride.final_price is not None else ride.price)
+        else:
+            amount = Decimal(request.data["amount"])
         msisdn = normalize_msisdn(request.data["msisdn"])
 
         # Idempotency (header facultatif ; fallback horodaté)
@@ -1219,13 +1227,16 @@ class MobileInitiate(APIView):
             defaults=dict(
                 ride=ride,
                 amount=amount,
-                currency=request.data.get("currency", "XAF"),
+                currency="XAF" if hasattr(ride, "pricing") else request.data.get("currency", "XAF"),
                 wallet="MOBILE_MONEY",
                 msisdn=msisdn,
                 provider=select_provider(ride),
                 status="PENDING",
             ),
         )
+
+        if p.ride_id != ride.pk:
+            return Response({"detail": "Référence de paiement déjà utilisée."}, status=409)
 
         # (Re)lancer un paiement seulement à la création ; si existant, on renvoie le tx_id
         if not created and p.provider_txid:

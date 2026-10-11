@@ -7,10 +7,20 @@ from .models import Ride
 
 
 class HistorySerializer(serializers.ModelSerializer):
+    driver_revenue = serializers.SerializerMethodField()
+
+    def get_driver_revenue(self, ride):
+        request = self.context.get("request")
+        if not request or request.query_params.get("role") != "driver":
+            return None
+        values = [p.allocation.driver_amount for p in ride.payments.all()
+                  if p.status == "SUCCESS" and hasattr(p, "allocation")]
+        return str(sum(values)) if values else None
+
     class Meta:
         model = Ride
         fields = ("id", "status", "pickup_location", "dropoff_location", "price",
-                  "final_price", "requested_at", "completed_at")
+                  "final_price", "requested_at", "completed_at", "driver_revenue")
 
 
 class HistoryPagination(PageNumberPagination):
@@ -30,4 +40,4 @@ class RideHistoryView(generics.ListAPIView):
         return Ride.objects.filter(
             **{owner_field: self.request.user.pk},
             status__in=("completed", "cancelled", "rejected"),
-        ).order_by("-requested_at", "-id")
+        ).prefetch_related("payments__allocation").order_by("-requested_at", "-id")

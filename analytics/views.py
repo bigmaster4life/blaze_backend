@@ -13,6 +13,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from RideVTC.accounting import allocated_amount
 from RideVTC.models import Ride, Payment
 from vehicles.models import Rental
 
@@ -124,10 +125,10 @@ class AnalyticsViewSet(ViewSet):
         )["v"] or Decimal("0")
         gmv = float(gmv_dec)
         drivers_earnings_dec = pay_qs.aggregate(
-            v=Coalesce(Sum(F("amount") * Decimal("0.80")), ZERO_MONEY, output_field=MONEY_FIELD)
+            v=Coalesce(Sum(allocated_amount("driver_amount", ".80")), ZERO_MONEY, output_field=MONEY_FIELD)
         )["v"] or Decimal("0")
         commission_dec = pay_qs.aggregate(
-            v=Coalesce(Sum(F("amount") * Decimal("0.20")), ZERO_MONEY, output_field=MONEY_FIELD)
+            v=Coalesce(Sum(allocated_amount("platform_amount", ".20")), ZERO_MONEY, output_field=MONEY_FIELD)
         )["v"] or Decimal("0")
 
         return Response({
@@ -181,7 +182,7 @@ class AnalyticsViewSet(ViewSet):
             ride__requested_at__range=(start, end), status="SUCCESS"
         )
         if city:
-            pay = pay.filter(ride__vehicle__city__iexact=city)
+            pay_qs = pay_qs.filter(ride__vehicle__city__iexact=city)
 
         qs = (
             pay_qs
@@ -189,7 +190,7 @@ class AnalyticsViewSet(ViewSet):
             .values("d")
             .annotate(
                 gmv=Coalesce(Sum("amount"), ZERO_MONEY, output_field=MONEY_FIELD),
-                commission=Coalesce(Sum(F("amount") * Decimal("0.20")), ZERO_MONEY, output_field=MONEY_FIELD),
+                commission=Coalesce(Sum(allocated_amount("platform_amount", ".20")), ZERO_MONEY, output_field=MONEY_FIELD),
             )
             .order_by("d")
         )
@@ -238,17 +239,17 @@ class AnalyticsViewSet(ViewSet):
         if city:
             rides = rides.filter(Q(vehicle__city__iexact=city))
 
-        pays = Payment.objects.filter(ride__in=rides, status="SUCCESS").select_related("ride")
+        pays = Payment.objects.filter(ride__in=rides, status="SUCCESS").select_related("ride", "allocation")
         pay_map = defaultdict(float)
         for p in pays:
-            pay_map[p.ride_id] += float(p.amount or 0)
+            pay_map[p.ride_id] += float(p.allocation.driver_amount) if hasattr(p, "allocation") else float(p.amount or 0) * 0.8
 
         stats = defaultdict(lambda: {"rides": 0, "revenue": 0.0, "name": "—", "rating": 5.0})
         for r in rides:
             did = r.driver_id or 0
             stats[did]["rides"] += 1
             stats[did]["name"] = (r.driver.get_full_name() if r.driver else "—") or (r.driver.email if r.driver else "—")
-            stats[did]["revenue"] += pay_map.get(r.id, 0.0) * 0.8
+            stats[did]["revenue"] += pay_map.get(r.id, 0.0)
 
         rows = sorted(
             [{"id": did or 0, **val} for did, val in stats.items()],

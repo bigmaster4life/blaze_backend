@@ -28,6 +28,7 @@ from .serializers import (
     DriverDocsSerializer,
     EarningSummarySerializer,
 )
+from RideVTC.accounting import allocated_amount
 from RideVTC.models import Payment
 from RideVTC.permissions import CanViewDriverProfile
 import datetime
@@ -663,7 +664,7 @@ class DriverEarningsSummary(APIView):
 
         def sum_between(start_dt):
             qs = base_qs.filter(updated_at__gte=start_dt)
-            total = qs.aggregate(s=Sum("amount"))["s"] or 0
+            total = qs.aggregate(s=Sum(allocated_amount("driver_amount", 1)))["s"] or 0
             return float(total)
 
         data = {
@@ -671,6 +672,8 @@ class DriverEarningsSummary(APIView):
             "week": sum_between(start_week),
             "month": sum_between(start_month),
             "currency": "XAF",
+            "cash_collected_today": float(base_qs.filter(wallet="CASH", updated_at__gte=start_today).aggregate(s=Sum("amount"))["s"] or 0),
+            "cash_commission_due_today": float(base_qs.filter(wallet="CASH", updated_at__gte=start_today).aggregate(s=Sum("allocation__cash_commission_due"))["s"] or 0),
         }
         return Response(EarningSummarySerializer(data).data, status=200)
     

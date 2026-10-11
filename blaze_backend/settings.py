@@ -342,6 +342,10 @@ AIRTEL_MONEY = {
     "WEBHOOK_SECRET": env("AIRTEL_WEBHOOK_SECRET", default=None),
 }
 
+# New quote flow is prepared locally; old mobile builds remain compatible.
+VTC_REQUIRE_QUOTE = env.bool("VTC_REQUIRE_QUOTE", default=False)
+VTC_QUOTE_COMMISSION_RATE = env("VTC_QUOTE_COMMISSION_RATE", default="0.22")
+
 PAUSE_FREE_SECONDS = 5 * 60
 PAUSE_RATE_PER_MIN = 250  # XAF
 RIDE_ACCEPT_TIMEOUT_S = 10      # délai pour que le chauffeur accepte

@@ -240,3 +240,25 @@ class DriverNavEvent(models.Model):
 
     def __str__(self):
         return f"{self.driver_id} {self.event_type} {self.request_id}"
+
+
+class RidePricing(models.Model):
+    """Immutable quote basis; absent on legacy rides, never backfilled implicitly."""
+    ride = models.OneToOneField(Ride, on_delete=models.CASCADE, related_name='pricing')
+    version = models.CharField(max_length=32)
+    reference_price = models.DecimalField(max_digits=10, decimal_places=2)
+    commission_rate = models.DecimalField(max_digits=5, decimal_places=4)
+    quoted_distance_km = models.FloatField()
+    quoted_duration_seconds = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class PaymentAllocation(models.Model):
+    """Accounting snapshot, not a bank transfer or a withdrawal balance."""
+    payment = models.OneToOneField(Payment, on_delete=models.CASCADE, related_name='allocation')
+    commission_rate = models.DecimalField(max_digits=5, decimal_places=4)
+    paid_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    platform_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    driver_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    cash_commission_due = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)

@@ -80,6 +80,8 @@ class DriverMeSerializer(serializers.Serializer):
     cancel_rate = serializers.FloatField(required=False, allow_null=True)
 
 class EarningSummarySerializer(serializers.Serializer):
+    cash_collected_today = serializers.IntegerField(required=False)
+    cash_commission_due_today = serializers.IntegerField(required=False)
     today = serializers.IntegerField()
     week = serializers.IntegerField()
     month = serializers.IntegerField()
