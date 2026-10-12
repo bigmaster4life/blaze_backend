@@ -343,6 +343,8 @@ AIRTEL_MONEY = {
 }
 
 # New quote flow is prepared locally; old mobile builds remain compatible.
+VTC_SHARED_ENABLED = env.bool("VTC_SHARED_ENABLED", default=False)
+VTC_SHARED_MAX_DETOUR_SECONDS = env.int("VTC_SHARED_MAX_DETOUR_SECONDS", default=300)
 VTC_REQUIRE_QUOTE = env.bool("VTC_REQUIRE_QUOTE", default=False)
 VTC_QUOTE_COMMISSION_RATE = env("VTC_QUOTE_COMMISSION_RATE", default="0.22")
 

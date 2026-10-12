@@ -30,3 +30,12 @@ class RideQuoteMenuView(APIView):
         return Response({'quotes': [make_quote(request.user.pk,
             {**serializer.validated_data, 'category': category}, metrics)
             for category in RATES]})
+
+
+class RideOptionsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.conf import settings
+        return Response({'shared_enabled': getattr(settings, 'VTC_SHARED_ENABLED', False),
+                         'max_passengers': 4, 'max_detour_seconds': getattr(settings, 'VTC_SHARED_MAX_DETOUR_SECONDS', 300)})

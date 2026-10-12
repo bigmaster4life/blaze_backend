@@ -5,6 +5,8 @@ from django.conf import settings
 from drivers.models import Driver
 
 class RideVehicle(models.Model):
+    shared_enabled = models.BooleanField(default=False)
+    passenger_capacity = models.PositiveSmallIntegerField(default=4)
     driver = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -38,6 +40,8 @@ class RideVehicle(models.Model):
 
     
 class Ride(models.Model):
+    ride_mode = models.CharField(max_length=16, default="classic", choices=[("classic", "Classique"), ("shared", "Partagé")])
+    passenger_count = models.PositiveSmallIntegerField(default=1)
     STATUS_CHOICES = [
         ('pending', 'En attente'),
         ('accepted', 'Acceptée'),
@@ -262,3 +266,28 @@ class PaymentAllocation(models.Model):
     driver_amount = models.DecimalField(max_digits=12, decimal_places=2)
     cash_commission_due = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class SharedTrip(models.Model):
+    driver = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='shared_trips')
+    vehicle = models.ForeignKey(RideVehicle, on_delete=models.PROTECT)
+    state = models.CharField(max_length=16, default='active')
+    stops = models.JSONField(default=list)
+    version = models.PositiveIntegerField(default=1)
+    last_lat = models.FloatField(null=True)
+    last_lng = models.FloatField(null=True)
+    last_location_at = models.DateTimeField(null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['driver'], condition=models.Q(state='active'), name='one_active_shared_trip_per_driver')]
+
+
+class SharedBooking(models.Model):
+    trip = models.ForeignKey(SharedTrip, on_delete=models.CASCADE, related_name='bookings')
+    ride = models.OneToOneField(Ride, on_delete=models.CASCADE, related_name='shared_booking')
+    travelled_m = models.FloatField(default=0)
+    shared_m = models.FloatField(default=0)
+    pickup_at = models.DateTimeField(null=True)
+    dropoff_at = models.DateTimeField(null=True)
+    discount_rate = models.DecimalField(max_digits=5, decimal_places=4, default=0)

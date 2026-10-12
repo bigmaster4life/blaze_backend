@@ -45,8 +45,12 @@ class QuoteInput(serializers.Serializer):
     dropoff_lat = serializers.FloatField(min_value=-90, max_value=90)
     dropoff_lng = serializers.FloatField(min_value=-180, max_value=180)
     category = serializers.ChoiceField(choices=list(RATES))
+    ride_mode = serializers.ChoiceField(choices=["classic", "shared"], default="classic")
+    passenger_count = serializers.IntegerField(min_value=1, max_value=4, default=1)
 
     def validate(self, attrs):
+        if attrs["ride_mode"] == "shared" and not getattr(settings, "VTC_SHARED_ENABLED", False):
+            raise serializers.ValidationError({"ride_mode": "Le partagé n’est pas encore disponible."})
         if not all(math.isfinite(attrs[k]) for k in ('pickup_lat', 'pickup_lng', 'dropoff_lat', 'dropoff_lng')):
             raise serializers.ValidationError('Coordonnées invalides.')
         return attrs
@@ -77,6 +81,7 @@ def route_metrics(data):
 
 
 def make_quote(user_id, data, metrics=None):
+    data = {"ride_mode": "classic", "passenger_count": 1, **data}
     distance, duration = metrics if metrics is not None else route_metrics(data)
     price = fare(data['category'], distance)
     # Freeze the configured rate in the signed quote.
@@ -98,8 +103,9 @@ def read_quote(token, user_id, data):
         quote = signing.loads(token, salt=SALT, max_age=300)
         if quote['user_id'] != user_id or quote['pricing_version'] != VERSION:
             raise ValueError('Quote owner/version mismatch')
-        for field in ('category', 'pickup_lat', 'pickup_lng', 'dropoff_lat', 'dropoff_lng'):
-            if quote[field] != data.get(field):
+        for field in ('category', 'pickup_lat', 'pickup_lng', 'dropoff_lat', 'dropoff_lng', 'ride_mode', 'passenger_count'):
+            default = {'ride_mode': 'classic', 'passenger_count': 1}.get(field)
+            if quote.get(field, default) != data.get(field, default):
                 raise ValueError('Quote itinerary mismatch')
         return quote
     except (signing.BadSignature, KeyError, ValueError, TypeError):

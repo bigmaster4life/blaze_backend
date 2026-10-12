@@ -7,7 +7,8 @@ from RideVTC.views import MobileInitiate, MobileStatus
 from RideVTC.callbacks import ProviderCallback
 from RideVTC.views import DriverPresenceView
 
-from .quotes import RideQuoteView, RideQuoteMenuView
+from .quotes import RideQuoteView, RideQuoteMenuView, RideOptionsView
+from .shared_views import SharedTripView, SharedPositionView, SharedStopView, SharedCurrentView
 from .history import RideHistoryView
 
 router = DefaultRouter()
@@ -15,6 +16,11 @@ router.register(r'ride-vehicles', RideVehicleViewSet, basename='ridevehicle')
 router.register(r"rides", RideViewSet, basename="rides")
 
 urlpatterns = [
+    path("rides/options/", RideOptionsView.as_view(), name="ride-options"),
+    path("shared-trips/current/", SharedCurrentView.as_view(), name="shared-current"),
+    path("shared-trips/<int:pk>/", SharedTripView.as_view(), name="shared-trip"),
+    path("shared-trips/<int:pk>/location/", SharedPositionView.as_view(), name="shared-position"),
+    path("shared-trips/<int:pk>/stop/", SharedStopView.as_view(), name="shared-stop"),
     path("rides/quotes/", RideQuoteMenuView.as_view(), name="ride-quotes"),
     path("rides/quote/", RideQuoteView.as_view(), name="ride-quote"),
     path("rides/history/", RideHistoryView.as_view(), name="ride-history"),

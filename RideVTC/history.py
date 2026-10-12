@@ -8,6 +8,12 @@ from .models import Ride
 
 class HistorySerializer(serializers.ModelSerializer):
     driver_revenue = serializers.SerializerMethodField()
+    shared_discount_percent = serializers.SerializerMethodField()
+
+    def get_shared_discount_percent(self, ride):
+        if hasattr(ride, 'shared_booking'):
+            return float(ride.shared_booking.discount_rate * 100)
+        return None
 
     def get_driver_revenue(self, ride):
         request = self.context.get("request")
@@ -20,7 +26,7 @@ class HistorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Ride
         fields = ("id", "status", "pickup_location", "dropoff_location", "price",
-                  "final_price", "requested_at", "completed_at", "driver_revenue")
+                  "final_price", "requested_at", "completed_at", "driver_revenue", "ride_mode", "passenger_count", "shared_discount_percent")
 
 
 class HistoryPagination(PageNumberPagination):
@@ -40,4 +46,4 @@ class RideHistoryView(generics.ListAPIView):
         return Ride.objects.filter(
             **{owner_field: self.request.user.pk},
             status__in=("completed", "cancelled", "rejected"),
-        ).prefetch_related("payments__allocation").order_by("-requested_at", "-id")
+        ).select_related("shared_booking").prefetch_related("payments__allocation").order_by("-requested_at", "-id")

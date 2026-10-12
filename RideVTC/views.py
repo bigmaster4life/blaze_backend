@@ -88,8 +88,38 @@ class RideVehicleViewSet(ModelViewSet):
     serializer_class = RideVehicleSerializer
     permission_classes = [AllowAny]
 
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve'):
+            return [AllowAny()]
+        return [permissions.IsAuthenticated(), IsDriver()]
+
+    def perform_create(self, serializer):
+        serializer.save(driver=self.request.user)
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        from .models import SharedTrip
+        from django.contrib.auth import get_user_model
+        from rest_framework.exceptions import ValidationError
+        get_user_model().objects.select_for_update().get(pk=self.request.user.pk)
+        if SharedTrip.objects.filter(vehicle=serializer.instance, state='active').exists():
+            raise ValidationError('Terminez le trajet partagé avant de modifier le véhicule.')
+        serializer.save(driver=self.request.user)
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        from django.contrib.auth import get_user_model
+        get_user_model().objects.select_for_update().get(pk=self.request.user.pk)
+        from .models import SharedTrip
+        from rest_framework.exceptions import ValidationError
+        if SharedTrip.objects.filter(vehicle=instance).exists():
+            raise ValidationError('Ce véhicule est lié à un trajet partagé.')
+        instance.delete()
+
     def get_queryset(self):
         queryset = RideVehicle.objects.filter(available=True)
+        if self.action not in ('list', 'retrieve'):
+            queryset = queryset.filter(driver=self.request.user)
         city = self.request.query_params.get('city')
         category = self.request.query_params.get('category')
 
@@ -136,6 +166,16 @@ class RideViewSet(viewsets.ModelViewSet):
 
     def get_serializer_class(self):
         return RideCreateSerializer if self.action in ("create", "create_alias") else RideSerializer
+
+    def update(self, request, *args, **kwargs):
+        if get_object_or_404(Ride, pk=kwargs.get('pk')).ride_mode == 'shared':
+            return Response({'detail': 'Utilisez les actions du trajet partagé.'}, status=405)
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if get_object_or_404(Ride, pk=kwargs.get('pk')).ride_mode == 'shared':
+            return Response({'detail': 'Utilisez l’annulation de la réservation.'}, status=405)
+        return super().destroy(request, *args, **kwargs)
 
     # ───────────────────────────────────────────────────────────
     # LIVE: état minimal de la course (auth contrôlée)
@@ -213,6 +253,15 @@ class RideViewSet(viewsets.ModelViewSet):
         }
         data["final_price"] = str(getattr(ride, "final_price", "") or "")
         data["pause_fee"] = int(getattr(ride, "pause_fee", 0) or 0)
+        data["ride_mode"] = ride.ride_mode
+        data["passenger_count"] = ride.passenger_count
+        if hasattr(ride, "shared_booking"):
+            booking = ride.shared_booking
+            data["shared_trip_id"] = booking.trip_id
+            data["shared_discount_percent"] = float(booking.discount_rate * 100)
+            if ride.driver_id == request.user.pk:
+                from .shared import trip_data
+                data["shared_trip"] = trip_data(booking.trip)
         return Response(data, status=status.HTTP_200_OK)
 
     # ───────────────────────────────────────────────────────────
@@ -221,6 +270,8 @@ class RideViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="location")
     def location(self, request, pk=None):
         ride = get_object_or_404(Ride, pk=pk)
+        if ride.ride_mode == 'shared':
+            return Response({'detail': 'Utilisez le trajet partagé sans supplément.'}, status=409)
         if ride.driver_id != request.user.id:
             return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
@@ -272,9 +323,10 @@ class RideViewSet(viewsets.ModelViewSet):
         lng = serializer.validated_data['lng']
 
         # Exemple: on met à jour le champ pickup_* juste pour démo
-        ride.pickup_lat = lat
-        ride.pickup_lng = lng
-        ride.save(update_fields=['pickup_lat', 'pickup_lng'])
+        if ride.ride_mode != 'shared':
+            ride.pickup_lat = lat
+            ride.pickup_lng = lng
+            ride.save(update_fields=['pickup_lat', 'pickup_lng'])
 
         if channel_layer and ride.driver_id:
             payload = {"type": "ride.rider.location", "requestId": ride.id, "lat": lat, "lng": lng}
@@ -291,13 +343,21 @@ class RideViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         ser = self.get_serializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
-        logger.warning("DEBUG CREATE RIDE → pickup_lat=%s pickup_lng=%s area=%s category=%s RAW_BODY=%s",
-            request.data.get("pickup_lat"),
-            request.data.get("pickup_lng"),
-            request.data.get("area"),
-            request.data.get("category"),
-            request.data
-        )
+        if ser.validated_data.get('ride_mode') == 'shared':
+            from django.contrib.auth import get_user_model
+            from django.db.models import Q
+            from datetime import timedelta
+            get_user_model().objects.select_for_update().get(pk=request.user.pk)
+            active = Ride.objects.filter(user=request.user).filter(
+                Q(status__in=['accepted', 'in_progress']) |
+                Q(status='pending', requested_at__gte=timezone.now()-timedelta(seconds=60))
+            ).order_by('-pk').first()
+            if active:
+                fields = ('ride_mode', 'passenger_count', 'category', 'pickup_lat', 'pickup_lng', 'dropoff_lat', 'dropoff_lng')
+                if all(getattr(active, field) == ser.validated_data.get(field) for field in fields):
+                    return Response(RideSerializer(active).data, status=200)
+                return Response({'detail': 'Une réservation est déjà active.', 'active_ride_id': active.pk}, status=409)
+
         ride: Ride = ser.save(status="pending", accepted_at=None, completed_at=None)
 
         def _clean(s: str) -> str:
@@ -314,8 +374,12 @@ class RideViewSet(viewsets.ModelViewSet):
             or "eco"
         )
 
+        from .shared import try_join
+        matched = try_join(ride) if ride.ride_mode == "shared" else False
+        if matched:
+            ride.refresh_from_db()
         # Dispatch après commit de la transaction
-        if channel_layer:
+        if channel_layer and not matched:
             if ride:
                 transaction.on_commit(
                     lambda: dispatch_ride_offer(
@@ -337,6 +401,20 @@ class RideViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     @action(detail=True, methods=["post"], url_path="accept")
     def accept(self, request, pk=None):
+        candidate = get_object_or_404(Ride, pk=pk)
+        if candidate.ride_mode == "shared":
+            from .shared import accept_first
+            from rest_framework.exceptions import ValidationError
+            try:
+                trip = accept_first(candidate.pk, request.user)
+            except ValidationError as exc:
+                return Response({'detail': exc.detail}, status=409)
+            return Response({"ok": True, "shared_trip_id": trip.pk})
+        from .models import SharedTrip
+        from django.contrib.auth import get_user_model
+        get_user_model().objects.select_for_update().get(pk=request.user.pk)
+        if SharedTrip.objects.filter(driver=request.user, state="active").exists():
+            return Response({"detail": "Terminez le trajet partagé actif."}, status=409)
         ride = get_object_or_404(Ride.objects.select_for_update(), pk=pk)
 
         # Si la course n'est plus "pending", on garde ton comportement actuel
@@ -491,6 +569,8 @@ class RideViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="pause/start")
     def pause_start(self, request, pk=None):
         ride = get_object_or_404(Ride, pk=pk)
+        if ride.ride_mode == 'shared':
+            return Response({'detail': 'Les pauses ne sont pas facturées en partagé.'}, status=409)
         if not (request.user.is_staff or ride.driver_id == request.user.id):
             return Response({"detail": "Forbidden"}, status=403)
         if ride.status not in {"accepted", "in_progress"}:
@@ -518,6 +598,8 @@ class RideViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="pause/stop")
     def pause_stop(self, request, pk=None):
         ride = get_object_or_404(Ride, pk=pk)
+        if ride.ride_mode == 'shared':
+            return Response({'detail': 'Les pauses ne sont pas facturées en partagé.'}, status=409)
         if not (request.user.is_staff or ride.driver_id == request.user.id):
             return Response({"detail": "Forbidden"}, status=403)
         
@@ -563,6 +645,10 @@ class RideViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     @action(detail=True, methods=["post"], url_path="cancel")
     def cancel(self, request, pk=None):
+        from .shared import cancel_booking
+        shared_ride = cancel_booking(pk, request.user)
+        if shared_ride:
+            return Response({"id": shared_ride.pk, "status": shared_ride.status})
         ride = get_object_or_404(Ride.objects.select_for_update(), pk=pk)
 
         is_customer = (ride.user_id == request.user.id)
@@ -621,6 +707,8 @@ class RideViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="arrived")
     def arrived(self, request, pk=None):
         ride = get_object_or_404(Ride, pk=pk)
+        if ride.ride_mode == "shared":
+            return Response({"detail": "Utilisez les arrêts du trajet partagé."}, status=409)
         if ride.driver_id != request.user.id:
             return Response({"detail": "Forbidden"}, status=403)
         
@@ -659,6 +747,8 @@ class RideViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="start")
     def start(self, request, pk=None):
         ride = get_object_or_404(Ride, pk=pk)
+        if ride.ride_mode == "shared":
+            return Response({"detail": "Utilisez les arrêts du trajet partagé."}, status=409)
         if ride.driver_id != request.user.id:
             return Response({"detail": "Forbidden"}, status=403)
 
@@ -719,6 +809,8 @@ class RideViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="finish")
     def finish(self, request, pk=None):
         ride = get_object_or_404(Ride, pk=pk)
+        if ride.ride_mode == "shared":
+            return Response({"detail": "Utilisez les arrêts du trajet partagé."}, status=409)
         if not (request.user.is_staff or ride.driver_id == request.user.id):
             return Response({"detail": "Forbidden"}, status=403)
         
@@ -1038,6 +1130,8 @@ class RideViewSet(viewsets.ModelViewSet):
         Body: { "boost_amount": 500 }
         """
         ride = get_object_or_404(Ride.objects.select_for_update(), pk=pk)
+        if ride.ride_mode == 'shared':
+            return Response({'detail': 'Utilisez le trajet partagé sans supplément.'}, status=409)
 
         # Sécurité : seul le client
         if ride.user_id != request.user.id:
@@ -1455,6 +1549,15 @@ class DriverVehicleMe(APIView):
 
     @transaction.atomic
     def put(self, request):
+        from .models import SharedTrip
+        from django.contrib.auth import get_user_model
+        get_user_model().objects.select_for_update().get(pk=request.user.pk)
+        if any(key in request.data for key in ('shared_enabled', 'passenger_capacity')):
+            from drivers.models import Driver
+            if not Driver.objects.filter(user=request.user, is_blocked=False).exists():
+                return Response({'detail': 'Compte chauffeur requis.'}, status=403)
+        if SharedTrip.objects.filter(driver=request.user, state='active').exists():
+            return Response({'detail': 'Terminez le trajet partagé avant de modifier le véhicule.'}, status=409)
         v = RideVehicle.objects.filter(driver=request.user).order_by('id').first()
         if not v:
             # Valeurs par défaut minimales pour éviter les NOT NULL

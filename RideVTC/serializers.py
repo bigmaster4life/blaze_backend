@@ -19,9 +19,12 @@ class RideVehicleSerializer(serializers.ModelSerializer):
     class Meta:
         model = RideVehicle
         fields = "__all__"
+        read_only_fields = ("driver", "shared_enabled", "passenger_capacity")
 
 
 class RideCreateSerializer(serializers.Serializer):
+    ride_mode = serializers.ChoiceField(choices=["classic", "shared"], default="classic")
+    passenger_count = serializers.IntegerField(min_value=1, max_value=4, default=1)
     pickup_location = serializers.CharField()
     dropoff_location = serializers.CharField()
     pickup_lat = serializers.FloatField(required=False)
@@ -58,6 +61,8 @@ class RideCreateSerializer(serializers.Serializer):
         #     })
         
 
+        if attrs["ride_mode"] == "shared" and (not getattr(settings, "VTC_SHARED_ENABLED", False) or not attrs.get("quote_token")):
+            raise serializers.ValidationError({"ride_mode": "Un devis partagé valide est requis."})
         token = attrs.get("quote_token")
         if getattr(settings, "VTC_REQUIRE_QUOTE", False) and not token:
             raise serializers.ValidationError({"quote_token": "Recalculez le prix avec une application à jour."})
@@ -106,6 +111,7 @@ class RideSerializer(serializers.ModelSerializer):
     class Meta:
         model = Ride
         fields = "__all__"
+        read_only_fields = ("ride_mode", "passenger_count")
 
 
 class RideOutSerializer(serializers.ModelSerializer):
@@ -126,12 +132,13 @@ class DriverRatingCreateSerializer(serializers.Serializer):
     comment = serializers.CharField(allow_blank=True, required=False)
 
 class DriverVehicleMeSerializer(serializers.ModelSerializer):
+    passenger_capacity = serializers.IntegerField(min_value=1, max_value=4)
     class Meta:
         model = RideVehicle
         fields = [
             'id','brand', 'model', 'plate', 'color', 'year',
             'insurance_valid_until', 'technical_valid_until',
-            'category', 'city', 'latitude', 'longitude','available',
+            'category', 'city', 'latitude', 'longitude','available', 'shared_enabled', 'passenger_capacity',
         ]
 class DriverNavEventSerializer(serializers.ModelSerializer):
     class Meta:

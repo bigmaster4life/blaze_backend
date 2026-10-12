@@ -9,7 +9,7 @@ from django.conf import settings
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
-from .models import Ride, RideVehicle, DriverPresence, DriverStats, DriverNavEvent
+from .models import SharedTrip, Ride, RideVehicle, DriverPresence, DriverStats, DriverNavEvent
 from .utils.rooms import driver_room
 from notifications.fcm import notify_driver_new_ride
 from django.contrib.auth import get_user_model
@@ -100,6 +100,13 @@ def _find_top_candidates(
         .exclude(driver_id__in=exclude_set)
     )
 
+    vehicles = vehicles.exclude(driver_id__in=SharedTrip.objects.filter(state="active").values("driver_id"))
+    if ride.ride_mode == "shared":
+        vehicles = vehicles.filter(shared_enabled=True, passenger_capacity__gte=ride.passenger_count)
+        vehicles = vehicles.exclude(driver_id__in=Ride.objects.filter(status__in=["accepted", "in_progress"]).values("driver_id"))
+        from drivers.models import Driver
+        vehicles = vehicles.filter(driver_id__in=Driver.objects.filter(is_blocked=False).values("user_id"))
+
     logger.info(f"[DISPATCH][DEBUG] STEP 2: vehicles category='{category}' = {vehicles.count()}")
     logger.info(f"[DISPATCH][DEBUG] STEP 2 IDs = {[v.driver_id for v in vehicles]}")
 
@@ -127,7 +134,7 @@ def _find_top_candidates(
     logger.info(f"[DISPATCH][DEBUG] STEP 3 result: {len(candidates)} candidates inside radius")
 
     # 4) SI VIDE → fallback par ville
-    if not candidates:
+    if not candidates and ride.ride_mode != "shared":
         rider_city = getattr(ride, "pickup_city", "") or ""
         logger.info(f"[DISPATCH][DEBUG] No distance candidates. Fallback city='{rider_city}'")
 
@@ -180,6 +187,8 @@ def _build_ride_payload(ride: Ride) -> dict:
 
     return {
         "id": ride.id,
+        "ride_mode": ride.ride_mode,
+        "passenger_count": ride.passenger_count,
         "category": getattr(ride, "category", "eco"),
         "pickup": {
             "label": getattr(ride, "pickup_location", None),
@@ -248,7 +257,7 @@ def dispatch_ride_offer(
     exclude_ids = set(extra_exclude_driver_ids or [])
     exclude_ids |= _get_excluded_drivers_for_ride(ride.id)
 
-    cat_sequence = _category_fallbacks(preferred_category or getattr(ride, "category", "eco"))
+    cat_sequence = [ride.category] if ride.ride_mode == "shared" else _category_fallbacks(preferred_category or getattr(ride, "category", "eco"))
 
     radii = [10, 15, 25, 30]
 
