@@ -1,5 +1,6 @@
 # Delivery/services/dispatch.py
 import logging
+import math
 import os
 
 from asgiref.sync import async_to_sync
@@ -22,7 +23,6 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 RADII = [15, 20, 30]               # km
 OFFER_TTL_SECONDS = 900            # 15 minutes
-MAX_OFFERS_NO_GPS = 10
 MAX_ACTIVE_DELIVERIES = 3
 
 ACTIVE_REQUEST_STATUSES = (
@@ -149,11 +149,20 @@ def driver_has_active_pickup_nearby(driver: DeliveryDriver, pickup_lat: float, p
     return False
 
 
+def valid_coordinates(lat, lng):
+    try:
+        return (lat is not None and lng is not None
+                and math.isfinite(float(lat)) and math.isfinite(float(lng))
+                and -90 <= float(lat) <= 90 and -180 <= float(lng) <= 180)
+    except (TypeError, ValueError):
+        return False
+
+
 def create_offers_for_request(req: DeliveryRequest) -> int:
-    """
-    Mode A (GPS dispo): ville + véhicule + dispo + distance (15/20/30km)
-    Mode B (GPS absent): ville + véhicule + dispo (sans distance)
-    + WS temps réel: pool + ciblé à chaque offer créée
+    """Offer to eligible couriers by GPS distance to pickup, across city boundaries.
+
+    Each radius is tried until at least one courier is found. City remains a pricing
+    attribute; unknown positions cannot establish proximity and receive no offer.
     """
     # VAN = opérateur humain
     if req.vehicle_type == DeliveryDriver.VEHICLE_VAN:
@@ -167,7 +176,6 @@ def create_offers_for_request(req: DeliveryRequest) -> int:
         is_verified=True,
         onboarding_completed=True,
         user__is_active=True,
-        city=req.city,
         vehicle_type=req.vehicle_type,
     )
 
@@ -183,109 +191,73 @@ def create_offers_for_request(req: DeliveryRequest) -> int:
 
     already = set(DeliveryOffer.objects.filter(request=req).values_list("driver_id", flat=True))
 
-    has_request_gps = (req.pickup_lat is not None and req.pickup_lng is not None)
-    has_any_driver_gps = drivers_qs.filter(last_lat__isnull=False, last_lng__isnull=False).exists()
-    can_do_gps_dispatch = has_request_gps and has_any_driver_gps
-
-    logger.info(
-        "[DELIVERY][DISPATCH] req=%s city=%s vehicle=%s mode=%s eligible=%s",
-        req.id, req.city, req.vehicle_type,
-        "A(GPS)" if can_do_gps_dispatch else "B(NO_GPS)",
-        drivers_qs.count(),
-    )
+    if not valid_coordinates(req.pickup_lat, req.pickup_lng):
+        logger.info("[DELIVERY][DISPATCH] req=%s -> no valid pickup GPS", req.id)
+        return 0
 
     created = 0
+    candidates = []
+    for d in drivers_qs:
+        if d.id in already:
+            continue
+        if not valid_coordinates(d.last_lat, d.last_lng):
+            continue
 
-    # =========================
-    # MODE A — GPS
-    # =========================
-    if can_do_gps_dispatch:
-        candidates = []
-        for d in drivers_qs:
+        dist = haversine_km(req.pickup_lat, req.pickup_lng, d.last_lat, d.last_lng)
+        score = float(dist)
+
+        clustered = False
+        if SMART_DISPATCH:
+            try:
+                clustered = driver_has_active_pickup_nearby(d, req.pickup_lat, req.pickup_lng)
+            except Exception:
+                clustered = False
+            if clustered:
+                score -= 5.0
+
+        candidates.append((d, dist, score, clustered))
+
+    if not candidates:
+        logger.info("[DELIVERY][DISPATCH] req=%s no candidates with valid GPS", req.id)
+        return 0
+
+    for radius in RADII:
+        pool = [(d, dist, score, clustered) for (d, dist, score, clustered) in candidates if dist <= radius]
+        pool.sort(key=lambda x: (x[2], x[1]))
+
+        for d, dist, score, clustered in pool:
             if d.id in already:
                 continue
-            if d.last_lat is None or d.last_lng is None:
-                continue
 
-            dist = haversine_km(req.pickup_lat, req.pickup_lng, d.last_lat, d.last_lng)
-            score = float(dist)
+            offer = DeliveryOffer.objects.create(
+                request=req,
+                driver=d,
+                distance_km=float(dist),
+                expires_at=expires_at,
+            )
 
-            clustered = False
-            if SMART_DISPATCH:
-                try:
-                    clustered = driver_has_active_pickup_nearby(d, req.pickup_lat, req.pickup_lng)
-                except Exception:
-                    clustered = False
-                if clustered:
-                    score -= 5.0
+            try:
+                notify_delivery_driver_new_order(d, req)
+            except Exception:
+                logger.exception("[FCM][DELIVERY] notify_delivery_driver_new_order crashed req=%s driver=%s", req.id, d.id)
+                pass
 
-            candidates.append((d, dist, score, clustered))
+            _broadcast_offer_created(offer)
 
-        if not candidates:
-            logger.info("[DELIVERY][DISPATCH] req=%s mode=A -> no candidates after gps filtering", req.id)
-            return 0
+            logger.info(
+                "[DELIVERY][DISPATCH] req=%s -> offer=%s driver=%s dist=%.2f score=%.2f clustered=%s",
+                req.id, offer.id, d.id, float(dist), float(score), clustered
+            )
 
-        for radius in RADII:
-            pool = [(d, dist, score, clustered) for (d, dist, score, clustered) in candidates if dist <= radius]
-            pool.sort(key=lambda x: (x[2], x[1]))
+            already.add(d.id)
+            created += 1
 
-            for d, dist, score, clustered in pool:
-                if d.id in already:
-                    continue
+        if created:
+            logger.info("[DELIVERY][DISPATCH] req=%s created=%s within radius=%skm", req.id, created, radius)
+            break
 
-                offer = DeliveryOffer.objects.create(
-                    request=req,
-                    driver=d,
-                    distance_km=float(dist),
-                    expires_at=expires_at,
-                )
-
-                try:
-                    notify_delivery_driver_new_order(d, req)
-                except Exception:
-                    logger.exception("[FCM][DELIVERY] notify_delivery_driver_new_order crashed req=%s driver=%s", req.id, d.id)
-                    pass
-
-                _broadcast_offer_created(offer)
-
-                logger.info(
-                    "[DELIVERY][DISPATCH] req=%s -> offer=%s driver=%s dist=%.2f score=%.2f clustered=%s",
-                    req.id, offer.id, d.id, float(dist), float(score), clustered
-                )
-
-                already.add(d.id)
-                created += 1
-
-            if created:
-                logger.info("[DELIVERY][DISPATCH] req=%s mode=A -> created=%s within radius=%skm", req.id, created, radius)
-                break
-
-        return created
-
-    # =========================
-    # MODE B — NO GPS
-    # =========================
-    pool = drivers_qs.exclude(id__in=list(already)).order_by("updated_at", "id")
-
-    for d in pool[:MAX_OFFERS_NO_GPS]:
-        offer = DeliveryOffer.objects.create(
-            request=req,
-            driver=d,
-            distance_km=0,
-            expires_at=expires_at,
-        )
-
-        try:
-
-            notify_delivery_driver_new_order(d, req)
-        except Exception as e:
-            logger.exception("[FCM][DELIVERY] notify_delivery_driver_new_order crashed req=%s driver=%s", req.id, d.id)
-
-        _broadcast_offer_created(offer)
-        created += 1
-
-    logger.info("[DELIVERY][DISPATCH] req=%s mode=B -> created=%s (no gps)", req.id, created)
     return created
+
 
 
 def expire_offers_and_request_if_needed(req: DeliveryRequest) -> None:
@@ -309,7 +281,7 @@ def expire_offers_and_request_if_needed(req: DeliveryRequest) -> None:
     has_accepted = req.offers.filter(status=DeliveryOffer.STATUS_ACCEPTED).exists()
 
     if not has_pending and not has_accepted:
-        req.status = DeliveryRequest.STATUS_FAILED
+        req.status = DeliveryRequest.STATUS_NO_DRIVER
         req.save(update_fields=["status", "updated_at"])
         _broadcast_request_status_to_client(req)
 

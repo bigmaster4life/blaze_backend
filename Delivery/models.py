@@ -127,6 +127,7 @@ class DeliveryRequest(models.Model):
     STATUS_DELIVERED = "delivered"
     STATUS_CANCELLED = "cancelled"
     STATUS_FAILED = "failed"
+    STATUS_NO_DRIVER = "no_driver"
     STATUS_DELIVERED_BY_DRIVER = "delivered_by_driver"
     STATUS_CONFIRMED_BY_CLIENT = "confirmed_by_client"
 
@@ -141,6 +142,7 @@ class DeliveryRequest(models.Model):
         (STATUS_DELIVERED, "Delivered"),
         (STATUS_CANCELLED, "Cancelled"),
         (STATUS_FAILED, "Failed"),
+        (STATUS_NO_DRIVER, "No driver available"),
     )
 
     PAY_CASH = "cash"

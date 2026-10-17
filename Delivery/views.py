@@ -333,7 +333,7 @@ class DeliveryRequestViewSet(mixins.CreateModelMixin,
         created = create_offers_for_request(req)
 
         if created == 0:
-            req.status = DeliveryRequest.STATUS_OPERATOR_REQUIRED
+            req.status = DeliveryRequest.STATUS_NO_DRIVER
             req.save(update_fields=["status", "updated_at"])
             try:
                 notify_client_update(req.user, "delivery", req.id, req.status)

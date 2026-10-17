@@ -21,7 +21,7 @@ class DeliveryOrderTests(TestCase):
         self.user=CustomUser.objects.create(email='buyer@order.test')
         self.driver_user=CustomUser.objects.create(email='courier@order.test')
         self.driver=DeliveryDriver.objects.create(user=self.driver_user,full_name='Livreur',phone='123',
-            is_verified=True,onboarding_completed=True)
+            is_verified=True,onboarding_completed=True,last_lat=.4,last_lng=9.4)
         self.payload={'type':'food','vehicle_type':'moto','pickup_zone':'libreville','dropoff_zone':'libreville',
             'pickup_label':'Restaurant adresse','pickup_lat':.4,'pickup_lng':9.4,
             'dropoff_label':'Client adresse','dropoff_lat':.41,'dropoff_lng':9.41,
@@ -127,7 +127,7 @@ class DeliveryOrderTests(TestCase):
                     response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)
                 self.assertEqual(response.status_code, 201)
                 self.assertEqual(response.data['order_details'], {})
-                self.assertEqual(response.data['status'], 'operator_required')
+                self.assertEqual(response.data['status'], 'no_driver')
                 self.assertEqual(DeliveryRequest.objects.filter(pk=response.data['id']).count(), 1)
 
     def test_create_endpoint_preserves_food_details_and_rejects_incomplete_details(self):
@@ -145,3 +145,81 @@ class DeliveryOrderTests(TestCase):
         response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)
         self.assertEqual(response.status_code, 400)
         self.assertEqual(DeliveryRequest.objects.count(), before)
+
+    def dispatch_silently(self, delivery):
+        with patch.object(dispatch_module, 'notify_delivery_driver_new_order'), patch.object(dispatch_module, '_ws_send_group'):
+            return create_offers_for_request(delivery)
+
+    def test_nearby_courier_from_another_city_receives_offer(self):
+        delivery = self.make_request()
+        delivery.city = 'angondje'
+        delivery.save()
+        self.assertEqual(self.driver.city, 'libreville')
+        self.assertEqual(self.dispatch_silently(delivery), 1)
+        self.assertEqual(delivery.offers.get().driver_id, self.driver.pk)
+
+    def test_faraway_courier_in_same_city_receives_no_offer(self):
+        delivery = self.make_request()
+        self.driver.last_lat = -0.7
+        self.driver.last_lng = 8.8
+        self.driver.save()
+        self.assertEqual(self.dispatch_silently(delivery), 0)
+
+    def test_unknown_or_invalid_driver_position_never_uses_city_as_fallback(self):
+        delivery = self.make_request()
+        for latitude, longitude in [(None, None), (91, 9), (0.4, 181)]:
+            self.driver.last_lat, self.driver.last_lng = latitude, longitude
+            self.driver.save()
+            self.assertEqual(self.dispatch_silently(delivery), 0)
+        self.assertFalse(delivery.offers.exists())
+
+    def test_dispatch_preserves_vehicle_and_verification_requirements(self):
+        delivery = self.make_request()
+        self.driver.vehicle_type = 'car'
+        self.driver.save()
+        self.assertEqual(self.dispatch_silently(delivery), 0)
+
+    def test_dispatch_expands_radius_and_does_not_send_duplicate_offers(self):
+        delivery = self.make_request()
+        self.driver.last_lat = 0.57  # about 19 km away: beyond first radius
+        self.driver.save()
+        self.assertEqual(self.dispatch_silently(delivery), 1)
+        self.assertGreater(delivery.offers.get().distance_km, 15)
+        self.assertEqual(self.dispatch_silently(delivery), 0)
+        self.assertEqual(delivery.offers.count(), 1)
+
+    def test_van_alone_requires_operator_and_never_dispatches(self):
+        request = APIRequestFactory().post('/', {**self.payload, 'vehicle_type': 'van', 'van_service': 'moving'}, format='json')
+        force_authenticate(request, self.user)
+        with patch('Delivery.views.create_offers_for_request') as dispatch:
+            response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['status'], 'operator_required')
+        dispatch.assert_not_called()
+
+    def test_expired_offers_report_no_driver_instead_of_manual_treatment(self):
+        delivery = self.make_request()
+        DeliveryOffer.objects.create(request=delivery, driver=self.driver, expires_at=timezone.now()-timedelta(seconds=1))
+        with patch.object(dispatch_module, '_ws_send_group'):
+            dispatch_module.expire_offers_and_request_if_needed(delivery)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, 'no_driver')
+
+    def test_real_create_dispatches_motorcycle_to_nearby_driver_across_zone_border(self):
+        payload = {**self.payload, 'pickup_zone': 'angondje'}
+        request = APIRequestFactory().post('/', payload, format='json')
+        force_authenticate(request, self.user)
+        with patch.object(dispatch_module, 'notify_delivery_driver_new_order'), patch.object(dispatch_module, '_ws_send_group'):
+            response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['status'], 'searching')
+        self.assertEqual(DeliveryOffer.objects.get(request_id=response.data['id']).driver_id, self.driver.pk)
+
+    def test_car_without_matching_driver_is_not_sent_to_operator(self):
+        request = APIRequestFactory().post('/', {**self.payload, 'vehicle_type': 'car'}, format='json')
+        force_authenticate(request, self.user)
+        with patch('Delivery.views.notify_client_update'):
+            response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['status'], 'no_driver')
+        self.assertFalse(DeliveryOffer.objects.filter(request_id=response.data['id']).exists())
