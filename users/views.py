@@ -140,9 +140,14 @@ class LoginView(APIView):
         return Response(data, status=200)
 
 class UserListView(ListAPIView):
-    queryset = CustomUser.objects.all()
+    from .staff import CanReadUsers, UserDirectoryPagination
     serializer_class = UserSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [CanReadUsers]
+    pagination_class = UserDirectoryPagination
+
+    def get_queryset(self):
+        from .staff import user_directory
+        return user_directory(self.request.query_params)
 
 
 class CustomerProfileViewSet(viewsets.ModelViewSet):

@@ -1,4 +1,5 @@
 from django.urls import path, include
+from .staff import StaffUserCreateView
 from .views import RegisterView, MeView, LoginView, UserListView, CustomerProfileViewSet, PhoneLoginView, RequestOTPView, VerifyOTPView, SetPasswordView, RequestOTPEmailView, CheckPhoneView, VerifyOTPEmailView, VerifySignupEmailView
 from rest_framework.routers import DefaultRouter
 
@@ -9,6 +10,7 @@ router.register(r'profiles', CustomerProfileViewSet, basename='profile')
 
 urlpatterns = [
     path('', UserListView.as_view(), name='user-root-list'),
+    path('staff/', StaffUserCreateView.as_view(), name='staff-user-create'),
     path('register/', RegisterView.as_view(), name='register'),
     path('me/', MeView.as_view(), name='me'),
     path('login/', LoginView.as_view(), name='login'),
