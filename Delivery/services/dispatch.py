@@ -14,7 +14,6 @@ from Delivery.utils.rooms import delivery_driver_room, delivery_pool_room, deliv
 
 from notifications.fcm import notify_delivery_driver_new_order, notify_client_update
 from RideVTC.utils.rooms import user_room
-from notifications.models import Device
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +66,8 @@ def _offer_payload_for_app(offer: DeliveryOffer) -> dict:
     req = offer.request
     return {
         "id": offer.id,
+        "offerId": offer.id,
+        "requestId": req.id,
         "request_id": req.id,
         "pickup_label": getattr(req, "pickup_label", None) or getattr(req, "pickup_address", None) or "",
         "dropoff_label": getattr(req, "dropoff_label", None) or getattr(req, "dropoff_address", None) or "",
@@ -80,8 +81,8 @@ def _offer_payload_for_app(offer: DeliveryOffer) -> dict:
 
 def _broadcast_offer_created(offer: DeliveryOffer) -> None:
     """
-    1) ciblé: delivery.driver.<driver_user_id>
-    2) pool:  delivery.pool.<city>.<vehicle_type>
+    Envoi ciblé à delivery.driver.<driver_user_id>.
+    Une offre nominative ne doit pas être diffusée aux autres livreurs.
     """
     try:
         req = offer.request
@@ -94,8 +95,7 @@ def _broadcast_offer_created(offer: DeliveryOffer) -> None:
         if driver_user_id:
             _ws_send_group(delivery_driver_room(int(driver_user_id)), WS_EVENT_NEW_OFFER, payload)
 
-        # pool ville + véhicule
-        _ws_send_group(delivery_pool_room(req.city, req.vehicle_type), WS_EVENT_NEW_OFFER, payload)
+        # Each offer belongs to one driver; do not broadcast it to other drivers.
 
     except Exception as e:
         logger.warning("[DELIVERY][WS] _broadcast_offer_created error offer=%s err=%s", getattr(offer, "id", None), e)
@@ -163,6 +163,10 @@ def create_offers_for_request(req: DeliveryRequest) -> int:
     drivers_qs = DeliveryDriver.objects.filter(
         is_active=True,
         is_available=True,
+        is_blocked=False,
+        is_verified=True,
+        onboarding_completed=True,
+        user__is_active=True,
         city=req.city,
         vehicle_type=req.vehicle_type,
     )
@@ -237,13 +241,6 @@ def create_offers_for_request(req: DeliveryRequest) -> int:
                 )
 
                 try:
-                    logger.error("🔥 DISPATCH CALL FCM driver=%s user=%s request=%s", d.id, d.user_id, req.id)
-
-                    logger.error("🧪 FCM DEBUG driver_user_id=%s", d.user_id)
-                    logger.error("🧪 FCM DEBUG devices_all_user=%s",
-                        list(Device.objects.filter(user_id=d.user_id).values("id","user_id","is_active","token")))
-                    logger.error("🧪 FCM DEBUG devices_active=%s",
-                                 list(Device.objects.filter(user_id=d.user_id, is_active=True).values("id","user_id","is_active","token")))
                     notify_delivery_driver_new_order(d, req)
                 except Exception:
                     logger.exception("[FCM][DELIVERY] notify_delivery_driver_new_order crashed req=%s driver=%s", req.id, d.id)
@@ -279,13 +276,7 @@ def create_offers_for_request(req: DeliveryRequest) -> int:
         )
 
         try:
-            logger.error("🔥 DISPATCH CALL FCM driver=%s user=%s request=%s", d.id, d.user_id, req.id)
 
-            logger.error("🧪 FCM DEBUG driver_user_id=%s", d.user_id)
-            logger.error("🧪 FCM DEBUG devices_all_user=%s",
-                         list(Device.objects.filter(user_id=d.user_id).values("id","user_id","is_active","token")))
-            logger.error("🧪 FCM DEBUG devices_active=%s",
-                         list(Device.objects.filter(user_id=d.user_id, is_active=True).values("id","user_id","is_active","token")))
             notify_delivery_driver_new_order(d, req)
         except Exception as e:
             logger.exception("[FCM][DELIVERY] notify_delivery_driver_new_order crashed req=%s driver=%s", req.id, d.id)

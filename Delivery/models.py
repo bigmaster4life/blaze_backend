@@ -187,6 +187,7 @@ class DeliveryRequest(models.Model):
     contact_name = models.CharField(max_length=120)
     contact_phone = models.CharField(max_length=30)
     note = models.TextField(blank=True, default="")
+    order_details = models.JSONField(default=dict, blank=True)
 
     vehicle_type = models.CharField(
         max_length=10,

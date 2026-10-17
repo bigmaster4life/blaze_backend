@@ -13,7 +13,24 @@ User = get_user_model()
 # CLIENT — DELIVERY REQUEST
 # ============================================================
 
+class DeliveryOrderDetailsSerializer(serializers.Serializer):
+    kind = serializers.ChoiceField(choices=['restaurant', 'shopping'])
+    merchant_name = serializers.CharField(max_length=160)
+    items = serializers.CharField(max_length=4000)
+    purchase_mode = serializers.ChoiceField(choices=['prepaid', 'buy_for_me'])
+    budget = serializers.IntegerField(min_value=1, max_value=1000000, required=False, allow_null=True)
+    reference = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        if attrs['purchase_mode'] == 'buy_for_me' and not attrs.get('budget'):
+            raise serializers.ValidationError({'budget': 'Précisez le budget maximal des achats.'})
+        if attrs['purchase_mode'] == 'prepaid':
+            attrs['budget'] = None
+        return attrs
+
+
 class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
+    order_details = DeliveryOrderDetailsSerializer(required=False)
     class Meta:
         model = DeliveryRequest
         fields = [
@@ -26,13 +43,15 @@ class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
 
             "pickup_label", "pickup_lat", "pickup_lng",
             "dropoff_label", "dropoff_lat", "dropoff_lng",
-            "contact_name", "contact_phone", "note",
+            "contact_name", "contact_phone", "note", "order_details",
             "van_service", "scheduled_for",
             "distance_km",
         ]
 
     def validate(self, attrs):
         vehicle_type = attrs.get("vehicle_type")
+        if attrs.get("order_details") and attrs.get("type", "package") != "food":
+            raise serializers.ValidationError({"order_details": "Ces détails concernent les repas et les courses."})
 
         if not attrs.get("pickup_zone"):
             raise serializers.ValidationError({"pickup_zone": "Obligatoire."})
@@ -108,6 +127,7 @@ class DeliveryOfferOutSerializer(serializers.ModelSerializer):
     contact_name = serializers.CharField(source="request.contact_name", read_only=True)
     contact_phone = serializers.CharField(source="request.contact_phone", read_only=True)
     note = serializers.CharField(source="request.note", read_only=True)
+    order_details = serializers.JSONField(source="request.order_details", read_only=True)
     delivery_type = serializers.CharField(source="request.type", read_only=True)
 
     class Meta:
@@ -134,6 +154,7 @@ class DeliveryOfferOutSerializer(serializers.ModelSerializer):
             "contact_name",
             "contact_phone",
             "note",
+            "order_details",
             "delivery_type",
 
             "distance_km",

@@ -112,10 +112,13 @@ def payload_vtc_new_ride(ride_id: int):
 # ==============================
 
 def payload_delivery_new_order(delivery_request):
+    details = getattr(delivery_request, 'order_details', None) or {}
+    merchant = details.get('merchant_name') if isinstance(details, dict) else None
+    pickup = merchant or delivery_request.pickup_label
     return {
         "notification": {
             "title": "Nouvelle livraison",
-            "body": f"{delivery_request.pickup_label} → {delivery_request.dropoff_label}"
+            "body": f"{pickup} → {delivery_request.dropoff_label}"
         },
         "android": {
             "priority": "HIGH",
@@ -190,9 +193,6 @@ def notify_delivery_driver_new_order(driver, delivery_request):
         Device.objects.filter(user=driver.user, is_active=True)
         .values_list("token", flat=True)
     )
-    print("DEBUG DRIVER USER =", driver.user_id)
-    print("DEBUG DEVICES =", list(Device.objects.filter(user=driver.user).values("token","is_active")))
-    print("DEBUG TOKENS =", tokens)
     if not tokens:
         print("⚠️ Aucun device enregistré pour ce livreur")
         return False

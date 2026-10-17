@@ -314,12 +314,6 @@ class DeliveryRequestViewSet(mixins.CreateModelMixin,
                             viewsets.GenericViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
-    def create(self, request, *args, **kwargs):
-        print("\n================ DELIVERY CREATE DEBUG ================")
-        print("RAW DATA =", request.data)
-        print("=======================================================\n")
-        return super().create(request, *args, **kwargs)
-
     def get_queryset(self):
         return DeliveryRequest.objects.filter(user=self.request.user).order_by("-id")
 
@@ -487,6 +481,9 @@ class DeliveryOfferViewSet(mixins.ListModelMixin,
 
             if not delivery_driver.is_available or not delivery_driver.is_active:
                 return Response({"detail": "Livreur indisponible."}, status=status.HTTP_400_BAD_REQUEST)
+
+            if delivery_driver.is_blocked or not delivery_driver.is_verified or not delivery_driver.onboarding_completed:
+                return Response({'detail': 'Compte livreur non autorisé à accepter une commande.'}, status=403)
 
             # Assignation
             req.assigned_driver = delivery_driver
