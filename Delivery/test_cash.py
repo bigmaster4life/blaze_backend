@@ -1,3 +1,4 @@
+from decimal import Decimal
 from datetime import timedelta
 from unittest.mock import patch
 import time
@@ -18,7 +19,7 @@ class DeliveryCashTests(TestCase):
         self.client_user = CustomUser.objects.create(email='cash-client@test.invalid')
         self.driver_user = CustomUser.objects.create(email='cash-driver@test.invalid')
         self.driver = DeliveryDriver.objects.create(user=self.driver_user, full_name='Livreur', phone='123', is_verified=True, onboarding_completed=True)
-        self.req = DeliveryRequest.objects.create(user=self.client_user, assigned_driver=self.driver, status='assigned', type='package', vehicle_type='moto', pickup_zone='libreville', dropoff_zone='libreville', pickup_label='Retrait', dropoff_label='Destination', pickup_lat=.4, pickup_lng=9.4, dropoff_lat=.41, dropoff_lng=9.41, contact_name='Client', contact_phone='123', estimated_price=1500, final_price=1500)
+        self.req = DeliveryRequest.objects.create(user=self.client_user, assigned_driver=self.driver, status='assigned', type='package', vehicle_type='moto', pickup_zone='libreville', dropoff_zone='libreville', pickup_label='Retrait', dropoff_label='Destination', pickup_lat=.4, pickup_lng=9.4, dropoff_lat=.41, dropoff_lng=9.41, contact_name='Client', contact_phone='123', estimated_price=1500, final_price=1500, payment_payer='recipient')
         self.payload = {'type':'package','vehicle_type':'moto','pickup_zone':'libreville','dropoff_zone':'libreville','pickup_label':'Retrait','dropoff_label':'Destination','pickup_lat':.4,'pickup_lng':9.4,'dropoff_lat':.41,'dropoff_lng':9.41,'contact_name':'Client','contact_phone':'123','payment_method':'cash','payment_payer':'recipient'}
 
     def action(self, name, data=None, user=None):
@@ -55,7 +56,7 @@ class DeliveryCashTests(TestCase):
         for _ in range(2): self.assertEqual(self.action('confirm_cash',{'amount':1500,'received':True}).status_code,200)
         self.req.refresh_from_db(); self.driver.refresh_from_db()
         self.assertTrue(self.req.is_paid); self.assertIsNotNone(self.req.cash_received_at)
-        self.assertEqual(self.driver.total_earnings,1500)
+        self.assertEqual(self.driver.total_earnings,1170)
 
     def test_sender_payment_required_before_pickup_and_recipient_cannot_be_collected_early(self):
         self.assertEqual(self.action('confirm_cash',{'amount':1500,'received':True}).status_code,400)
@@ -100,7 +101,7 @@ class DeliveryCashTests(TestCase):
         self.assertIsNotNone(self.req.purchase_reimbursed_at)
         self.assertFalse(self.req.is_paid); self.assertEqual(self.driver.total_earnings,0)
         self.assertEqual(self.action('confirm_cash',{'amount':1500,'received':True}).status_code,200)
-        self.driver.refresh_from_db(); self.assertEqual(self.driver.total_earnings,1500)
+        self.driver.refresh_from_db(); self.assertEqual(self.driver.total_earnings,1170)
 
     def test_advance_requires_explicit_agreement_before_acceptance(self):
         self.buy('driver_advance'); self.req.purchase_advance_accepted_at=None
@@ -155,3 +156,68 @@ class DeliveryCashTests(TestCase):
         request=APIRequestFactory().get('/');force_authenticate(request,self.client_user)
         response=DeliveryRequestViewSet.as_view({'get':'driver_location'})(request,pk=self.req.pk)
         self.assertEqual(response.status_code,400)
+
+    def test_fee_allocation_excludes_goods_and_is_recorded_only_once(self):
+        from .models import DeliveryPaymentAllocation
+        from .services.accounting import driver_summary
+        self.buy('driver_advance')
+        self.action('purchase_amount', {'amount':4200})
+        self.action('mark_picked_up')
+        self.action('purchase_reimbursement', {'amount':4200,'received':True})
+        for _ in range(2): self.action('confirm_cash', {'amount':1500,'received':True})
+        self.assertEqual(DeliveryPaymentAllocation.objects.count(),1)
+        allocation = self.req.payment_allocation
+        self.assertEqual(allocation.paid_amount,1500)
+        self.assertEqual(allocation.platform_amount,330)
+        self.assertEqual(allocation.driver_amount,1170)
+        self.assertEqual(allocation.cash_commission_due,330)
+        summary = driver_summary(self.driver)
+        self.assertEqual(Decimal(summary['net']),1170)
+        self.assertIsNone(summary['withdrawable_balance'])
+
+    def test_new_order_defaults_to_sender_without_rewriting_old_orders(self):
+        payload = dict(self.payload)
+        payload.pop('payment_payer')
+        with patch('Delivery.services.quotes.get_directions',return_value={'distance_m':1000}):
+            quote = self.as_client('quote',payload)
+        response = self.as_client('create',{**payload,'quote_token':quote.data['quote_token']})
+        self.assertEqual(response.status_code,201)
+        self.assertEqual(response.data['payment_payer'],'sender')
+        self.req.refresh_from_db()
+        self.assertEqual(self.req.payment_payer,'recipient')
+
+    def test_allocation_rounding_preserves_total_and_retries_do_not_rewrite_it(self):
+        from .models import DeliveryPaymentAllocation
+        self.req.status='picked_up'; self.req.final_price=1525; self.req.save()
+        self.assertEqual(self.action('confirm_cash', {'amount':1525,'received':True}).status_code,200)
+        allocation=self.req.payment_allocation
+        self.assertEqual(allocation.platform_amount,336)
+        self.assertEqual(allocation.driver_amount,1189)
+        self.assertEqual(allocation.platform_amount+allocation.driver_amount,1525)
+        DeliveryRequest.objects.filter(pk=self.req.pk).update(final_price=9999)
+        self.action('confirm_cash', {'amount':9999,'received':True})
+        allocation.refresh_from_db(); self.assertEqual(allocation.paid_amount,1525)
+        self.assertEqual(DeliveryPaymentAllocation.objects.count(),1)
+
+    def test_historical_paid_fee_does_not_become_a_new_net_earning(self):
+        from .models import DeliveryPaymentAllocation
+        self.req.status='delivered'; self.req.is_paid=True; self.req.save()
+        self.driver.total_earnings=9000; self.driver.save()
+        self.assertEqual(self.action('confirm_cash', {'amount':1500,'received':True}).status_code,200)
+        self.driver.refresh_from_db()
+        self.assertEqual(self.driver.total_earnings,9000)
+        self.assertFalse(DeliveryPaymentAllocation.objects.exists())
+
+    def test_profile_stats_and_admin_expose_same_read_only_accounting(self):
+        from .serializers import DeliveryDriverProfileSerializer, DeliveryDriverStatsSerializer, DeliveryDriverAdminDetailSerializer
+        self.req.status='picked_up'; self.req.save()
+        self.action('confirm_cash', {'amount':1500,'received':True})
+        for serializer_class in (DeliveryDriverProfileSerializer, DeliveryDriverStatsSerializer, DeliveryDriverAdminDetailSerializer):
+            summary=serializer_class(self.driver).data['settlement_summary']
+            self.assertEqual(Decimal(summary['net']),1170)
+            self.assertEqual(Decimal(summary['commission']),330)
+            self.assertEqual(Decimal(summary['cash_commission_due']),330)
+            self.assertIsNone(summary['withdrawable_balance'])
+        serializer=DeliveryDriverProfileSerializer(self.driver,data={'total_earnings':999999,'total_deliveries':999},partial=True)
+        self.assertTrue(serializer.is_valid())
+        self.assertEqual(serializer.validated_data,{})

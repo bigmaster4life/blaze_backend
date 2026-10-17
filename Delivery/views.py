@@ -329,8 +329,8 @@ class DeliveryDriverViewSet(viewsets.ViewSet):
             req.cash_received_at = timezone.now()
             req.final_price = expected
             req.save(update_fields=['is_paid', 'cash_received_at', 'final_price', 'updated_at'])
-            driver.total_earnings += expected
-            driver.save(update_fields=['total_earnings', 'updated_at'])
+            from .services.accounting import record_cash_allocation
+            record_cash_allocation(req, driver, expected)
             publish_delivery_status(req, push=False)
         return Response(DeliveryRequestOutSerializer(req).data)
 

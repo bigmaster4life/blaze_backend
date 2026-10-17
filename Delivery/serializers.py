@@ -34,7 +34,7 @@ class DeliveryOrderDetailsSerializer(serializers.Serializer):
 class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
     quote_token = serializers.CharField(required=False, write_only=True)
     payment_method = serializers.ChoiceField(choices=['cash'], required=False, default='cash')
-    payment_payer = serializers.ChoiceField(choices=['sender', 'recipient'], required=False, default='recipient')
+    payment_payer = serializers.ChoiceField(choices=['sender', 'recipient'], required=False, default='sender')
     order_details = DeliveryOrderDetailsSerializer(required=False)
     class Meta:
         model = DeliveryRequest
@@ -116,6 +116,18 @@ class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
 
 
 class DeliveryRequestOutSerializer(serializers.ModelSerializer):
+    payment_allocation = serializers.SerializerMethodField()
+
+    def get_payment_allocation(self, obj):
+        from .models import DeliveryPaymentAllocation
+        try:
+            allocation = obj.payment_allocation
+        except DeliveryPaymentAllocation.DoesNotExist:
+            return None
+        return {field: str(getattr(allocation, field)) for field in (
+            'commission_rate', 'paid_amount', 'platform_amount', 'driver_amount', 'cash_commission_due'
+        )}
+
     class Meta:
         model = DeliveryRequest
         fields = "__all__"
@@ -239,10 +251,17 @@ class DeliveryDriverOnboardingSerializer(serializers.ModelSerializer):
 # ============================================================
 
 class DeliveryDriverProfileSerializer(serializers.ModelSerializer):
+    settlement_summary = serializers.SerializerMethodField()
+
+    def get_settlement_summary(self, obj):
+        from .services.accounting import driver_summary
+        return driver_summary(obj)
+
     email = serializers.CharField(source="user.email", read_only=True)
 
     class Meta:
         model = DeliveryDriver
+        read_only_fields = ("total_deliveries", "total_earnings")
         fields = [
             "id",
             "email",
@@ -255,7 +274,7 @@ class DeliveryDriverProfileSerializer(serializers.ModelSerializer):
             "is_verified",
             "onboarding_completed",
             "total_deliveries",
-            "total_earnings",
+            "total_earnings", "settlement_summary",
             "created_at",
         ]
 
@@ -264,12 +283,12 @@ class DeliveryDriverProfileSerializer(serializers.ModelSerializer):
 # LIVREUR — STATS
 # ============================================================
 
-class DeliveryDriverStatsSerializer(serializers.ModelSerializer):
+class DeliveryDriverStatsSerializer(DeliveryDriverProfileSerializer):
     class Meta:
         model = DeliveryDriver
         fields = [
             "total_deliveries",
-            "total_earnings",
+            "total_earnings", "settlement_summary",
         ]
 
 
@@ -362,7 +381,7 @@ class DeliveryDriverAdminListSerializer(serializers.ModelSerializer):
             "created_at",
         ]
 
-class DeliveryDriverAdminDetailSerializer(serializers.ModelSerializer):
+class DeliveryDriverAdminDetailSerializer(DeliveryDriverProfileSerializer):
     email = serializers.CharField(source="user.email", read_only=True)
 
     class Meta:
@@ -389,7 +408,7 @@ class DeliveryDriverAdminDetailSerializer(serializers.ModelSerializer):
 
             # Stats
             "total_deliveries",
-            "total_earnings",
+            "total_earnings", "settlement_summary",
 
             "created_at",
             "updated_at",

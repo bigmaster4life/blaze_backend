@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import DeliveryDriver, DeliveryZone, DeliveryRequest
+from .models import DeliveryDriver, DeliveryZone, DeliveryRequest, DeliveryPaymentAllocation
 
 
 @admin.register(DeliveryDriver)
@@ -88,3 +88,19 @@ class DeliveryRequestAdmin(admin.ModelAdmin):
     list_display = ("id", "user", "type", "status", "vehicle_type", "estimated_price", "assigned_driver", "created_at")
     search_fields = ("pickup_label", "dropoff_label", "contact_name", "contact_phone")
     list_filter = ("type", "status", "vehicle_type", "payment_method", "is_paid")
+
+
+@admin.register(DeliveryPaymentAllocation)
+class DeliveryPaymentAllocationAdmin(admin.ModelAdmin):
+    list_display = ('id', 'request', 'driver', 'paid_amount', 'platform_amount', 'driver_amount', 'cash_commission_due', 'created_at')
+    list_filter = ('created_at',)
+    search_fields = ('driver__full_name', 'driver__phone')
+
+    def get_readonly_fields(self, request, obj=None):
+        return [field.name for field in self.model._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

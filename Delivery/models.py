@@ -208,7 +208,7 @@ class DeliveryRequest(models.Model):
 
     payment_method = models.CharField(max_length=10, choices=PAYMENT_CHOICES, default=PAY_CASH)
     is_paid = models.BooleanField(default=False)  # delivery fee only; goods are separate
-    payment_payer = models.CharField(max_length=12, choices=[('sender', 'Expéditeur au retrait'), ('recipient', 'Destinataire à la remise'), ('unknown', 'Payeur non renseigné')], default='recipient')
+    payment_payer = models.CharField(max_length=12, choices=[('sender', 'Expéditeur au retrait'), ('recipient', 'Destinataire à la remise'), ('unknown', 'Payeur non renseigné')], default='sender')
     cash_received_at = models.DateTimeField(null=True, blank=True)
     purchase_funds_amount = models.PositiveIntegerField(null=True, blank=True)
     purchase_funds_received_at = models.DateTimeField(null=True, blank=True)
@@ -337,4 +337,15 @@ class DeliveryOffer(models.Model):
 
     def is_expired(self) -> bool:
         return timezone.now() >= self.expires_at
-    
+
+
+class DeliveryPaymentAllocation(models.Model):
+    """Fee split recorded at collection; not a wallet or an executed payout."""
+    request = models.OneToOneField(DeliveryRequest, on_delete=models.PROTECT, related_name='payment_allocation')
+    driver = models.ForeignKey(DeliveryDriver, on_delete=models.PROTECT, related_name='payment_allocations')
+    commission_rate = models.DecimalField(max_digits=5, decimal_places=4)
+    paid_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    platform_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    driver_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    cash_commission_due = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
