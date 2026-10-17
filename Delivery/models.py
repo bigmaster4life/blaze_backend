@@ -207,7 +207,15 @@ class DeliveryRequest(models.Model):
     distance_km = models.FloatField(default=0)
 
     payment_method = models.CharField(max_length=10, choices=PAYMENT_CHOICES, default=PAY_CASH)
-    is_paid = models.BooleanField(default=False)
+    is_paid = models.BooleanField(default=False)  # delivery fee only; goods are separate
+    payment_payer = models.CharField(max_length=12, choices=[('sender', 'Expéditeur au retrait'), ('recipient', 'Destinataire à la remise'), ('unknown', 'Payeur non renseigné')], default='recipient')
+    cash_received_at = models.DateTimeField(null=True, blank=True)
+    purchase_funds_amount = models.PositiveIntegerField(null=True, blank=True)
+    purchase_funds_received_at = models.DateTimeField(null=True, blank=True)
+    purchase_actual_amount = models.PositiveIntegerField(null=True, blank=True)
+    purchase_advance_accepted_at = models.DateTimeField(null=True, blank=True)
+    purchase_reimbursed_at = models.DateTimeField(null=True, blank=True)
+    purchase_change_returned_at = models.DateTimeField(null=True, blank=True)
 
     assigned_driver = models.ForeignKey(
         DeliveryDriver,

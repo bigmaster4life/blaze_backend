@@ -27,6 +27,11 @@ class DeliveryOrderTests(TestCase):
             'dropoff_label':'Client adresse','dropoff_lat':.41,'dropoff_lng':9.41,
             'distance_km':1,'contact_name':'Client','contact_phone':'123'}
 
+    def api_payload(self, payload):
+        from django.core import signing
+        from .services.quotes import fingerprint, SALT
+        return {**payload, 'quote_token': signing.dumps({'user_id': self.user.pk, 'route': fingerprint(payload), 'distance_km': 1, 'price': None if payload.get('vehicle_type') == 'van' else 1500}, salt=SALT)}
+
     def serializer(self,details=None,**overrides):
         payload={**self.payload,**overrides}
         if details is not None: payload['order_details']=details
@@ -121,7 +126,7 @@ class DeliveryOrderTests(TestCase):
     def test_create_endpoint_returns_saved_request_for_every_delivery_type(self):
         for category in ['food', 'package', 'documents', 'express']:
             with self.subTest(category=category):
-                request = APIRequestFactory().post('/', {**self.payload, 'type': category}, format='json')
+                request = APIRequestFactory().post('/', self.api_payload({**self.payload, 'type': category}), format='json')
                 force_authenticate(request, self.user)
                 with patch('Delivery.views.create_offers_for_request', return_value=0), patch('Delivery.views.notify_client_update'):
                     response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)
@@ -131,7 +136,7 @@ class DeliveryOrderTests(TestCase):
                 self.assertEqual(DeliveryRequest.objects.filter(pk=response.data['id']).count(), 1)
 
     def test_create_endpoint_preserves_food_details_and_rejects_incomplete_details(self):
-        request = APIRequestFactory().post('/', {**self.payload, 'order_details': DETAILS}, format='json')
+        request = APIRequestFactory().post('/', self.api_payload({**self.payload, 'order_details': DETAILS}), format='json')
         force_authenticate(request, self.user)
         with patch('Delivery.views.create_offers_for_request', return_value=1):
             response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)
@@ -140,7 +145,7 @@ class DeliveryOrderTests(TestCase):
         self.assertEqual(response.data['order_details']['reference'], 'BE-123')
         self.assertEqual(response.data['status'], 'searching')
         before = DeliveryRequest.objects.count()
-        request = APIRequestFactory().post('/', {**self.payload, 'order_details': {}}, format='json')
+        request = APIRequestFactory().post('/', self.api_payload({**self.payload, 'order_details': {}}), format='json')
         force_authenticate(request, self.user)
         response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)
         self.assertEqual(response.status_code, 400)
@@ -189,7 +194,7 @@ class DeliveryOrderTests(TestCase):
         self.assertEqual(delivery.offers.count(), 1)
 
     def test_van_alone_requires_operator_and_never_dispatches(self):
-        request = APIRequestFactory().post('/', {**self.payload, 'vehicle_type': 'van', 'van_service': 'moving'}, format='json')
+        request = APIRequestFactory().post('/', self.api_payload({**self.payload, 'vehicle_type': 'van', 'van_service': 'moving'}), format='json')
         force_authenticate(request, self.user)
         with patch('Delivery.views.create_offers_for_request') as dispatch:
             response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)
@@ -207,7 +212,7 @@ class DeliveryOrderTests(TestCase):
 
     def test_real_create_dispatches_motorcycle_to_nearby_driver_across_zone_border(self):
         payload = {**self.payload, 'pickup_zone': 'angondje'}
-        request = APIRequestFactory().post('/', payload, format='json')
+        request = APIRequestFactory().post('/', self.api_payload(payload), format='json')
         force_authenticate(request, self.user)
         with patch.object(dispatch_module, 'notify_delivery_driver_new_order'), patch.object(dispatch_module, '_ws_send_group'):
             response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)
@@ -216,7 +221,7 @@ class DeliveryOrderTests(TestCase):
         self.assertEqual(DeliveryOffer.objects.get(request_id=response.data['id']).driver_id, self.driver.pk)
 
     def test_car_without_matching_driver_is_not_sent_to_operator(self):
-        request = APIRequestFactory().post('/', {**self.payload, 'vehicle_type': 'car'}, format='json')
+        request = APIRequestFactory().post('/', self.api_payload({**self.payload, 'vehicle_type': 'car'}), format='json')
         force_authenticate(request, self.user)
         with patch('Delivery.views.notify_client_update'):
             response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)

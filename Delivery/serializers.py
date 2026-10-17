@@ -14,6 +14,7 @@ User = get_user_model()
 # ============================================================
 
 class DeliveryOrderDetailsSerializer(serializers.Serializer):
+    funding_mode = serializers.ChoiceField(choices=['client_funded', 'driver_advance'], required=False, default='client_funded')
     kind = serializers.ChoiceField(choices=['restaurant', 'shopping'])
     merchant_name = serializers.CharField(max_length=160)
     items = serializers.CharField(max_length=4000)
@@ -26,15 +27,19 @@ class DeliveryOrderDetailsSerializer(serializers.Serializer):
             raise serializers.ValidationError({'budget': 'Précisez le budget maximal des achats.'})
         if attrs['purchase_mode'] == 'prepaid':
             attrs['budget'] = None
+            attrs['funding_mode'] = 'client_funded'
         return attrs
 
 
 class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
+    quote_token = serializers.CharField(required=False, write_only=True)
+    payment_method = serializers.ChoiceField(choices=['cash'], required=False, default='cash')
+    payment_payer = serializers.ChoiceField(choices=['sender', 'recipient'], required=False, default='recipient')
     order_details = DeliveryOrderDetailsSerializer(required=False)
     class Meta:
         model = DeliveryRequest
         fields = [
-            "id",
+            "id", "payment_method", "payment_payer", "quote_token",
             "type",
             "vehicle_type",
 
@@ -71,6 +76,12 @@ class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
                     "van_service": "Obligatoire (moving ou shipping)."
                 })
 
+        token = attrs.pop('quote_token', None)
+        if self.context.get('require_quote') and not token:
+            raise serializers.ValidationError({'detail': 'Veuillez confirmer le tarif depuis le récapitulatif.'})
+        if token:
+            from .services.quotes import read_quote
+            attrs['_quote'] = read_quote(token, attrs, self.context['request'].user)
         return attrs
 
     def to_representation(self, instance):
@@ -80,6 +91,12 @@ class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         user = self.context["request"].user
+        quote = validated_data.pop('_quote', None)
+        if quote:
+            validated_data['distance_km'] = quote['distance_km']
+            if quote['price'] is not None:
+                validated_data['estimated_price'] = quote['price']
+                validated_data['final_price'] = quote['price']
 
         # compat provisoire avec l'ancien champ city
         if not validated_data.get("city"):
@@ -134,11 +151,13 @@ class DeliveryOfferOutSerializer(serializers.ModelSerializer):
     note = serializers.CharField(source="request.note", read_only=True)
     order_details = serializers.JSONField(source="request.order_details", read_only=True)
     delivery_type = serializers.CharField(source="request.type", read_only=True)
+    payment_method = serializers.CharField(source='request.payment_method', read_only=True)
+    payment_payer = serializers.CharField(source='request.payment_payer', read_only=True)
 
     class Meta:
         model = DeliveryOffer
         fields = [
-            "id",
+            "id", "payment_method", "payment_payer",
             "request_id",
 
             "pickup_zone",

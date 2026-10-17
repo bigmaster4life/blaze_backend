@@ -1,6 +1,5 @@
 # Delivery/services/dispatch.py
 import logging
-import math
 import os
 
 from asgiref.sync import async_to_sync
@@ -10,7 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from Delivery.models import DeliveryDriver, DeliveryOffer, DeliveryRequest
-from Delivery.utils.geo import haversine_km
+from Delivery.utils.geo import haversine_km, valid_coordinates
 from Delivery.utils.rooms import delivery_driver_room, delivery_pool_room, delivery_user_room
 
 from notifications.fcm import notify_delivery_driver_new_order, notify_client_update
@@ -131,12 +130,13 @@ def _broadcast_request_status_to_client(req: DeliveryRequest) -> None:
         logger.warning("[DELIVERY][WS] _broadcast_request_status_to_client error req=%s err=%s", getattr(req, "id", None), e)
 
 
-def publish_delivery_status(req):
+def publish_delivery_status(req, *, push=True):
     """Publish committed state immediately; Firebase network I/O runs separately."""
     def publish():
         _broadcast_request_status_to_client(req)
-        from notifications.delivery_tasks import submit_delivery_status
-        submit_delivery_status(req.id, req.status)
+        if push:
+            from notifications.delivery_tasks import submit_delivery_status
+            submit_delivery_status(req.id, req.status)
     transaction.on_commit(publish)
 
 
@@ -157,14 +157,6 @@ def driver_has_active_pickup_nearby(driver: DeliveryDriver, pickup_lat: float, p
             return True
     return False
 
-
-def valid_coordinates(lat, lng):
-    try:
-        return (lat is not None and lng is not None
-                and math.isfinite(float(lat)) and math.isfinite(float(lng))
-                and -90 <= float(lat) <= 90 and -180 <= float(lng) <= 180)
-    except (TypeError, ValueError):
-        return False
 
 
 def create_offers_for_request(req: DeliveryRequest) -> int:
@@ -302,7 +294,7 @@ def driver_active_deliveries_count(driver: DeliveryDriver) -> int:
 
 
 @transaction.atomic
-def accept_delivery_offer(offer_id: int, user):
+def accept_delivery_offer(offer_id: int, user, accept_purchase_advance=False):
     """
     - offer -> ACCEPTED
     - request -> ASSIGNED
@@ -352,12 +344,18 @@ def accept_delivery_offer(offer_id: int, user):
     if not driver.is_available or not driver.is_active:
         return {"ok": False, "detail": "Livreur indisponible."}, 400
 
+    details = req.order_details or {}
+    if details.get('purchase_mode') == 'buy_for_me' and details.get('funding_mode') == 'driver_advance':
+        if accept_purchase_advance is not True:
+            return {'ok': False, 'detail': 'Acceptez explicitement l’avance des achats.'}, 400
+        req.purchase_advance_accepted_at = now
+
     # assign request
     req.assigned_driver = driver
     req.status = DeliveryRequest.STATUS_ASSIGNED
     if hasattr(req, "assigned_by_operator"):
         req.assigned_by_operator = False
-    req.save(update_fields=["assigned_driver", "status", "updated_at"] + (["assigned_by_operator"] if hasattr(req, "assigned_by_operator") else []))
+    req.save(update_fields=["assigned_driver", "status", "purchase_advance_accepted_at", "updated_at"] + (["assigned_by_operator"] if hasattr(req, "assigned_by_operator") else []))
 
     # accept offer
     offer.status = DeliveryOffer.STATUS_ACCEPTED
