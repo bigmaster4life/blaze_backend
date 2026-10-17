@@ -8,7 +8,7 @@ from users.models import CustomUser
 from .models import DeliveryDriver, DeliveryOffer, DeliveryRequest
 from .serializers import DeliveryRequestCreateSerializer, DeliveryOfferOutSerializer
 with patch.dict(sys.modules, {'notifications.fcm': Mock()}):
-    from .views import DeliveryOfferViewSet
+    from .views import DeliveryOfferViewSet, DeliveryRequestViewSet
     from .services.dispatch import _broadcast_offer_created, create_offers_for_request
     import importlib
     dispatch_module = importlib.import_module("Delivery.services.dispatch")
@@ -117,3 +117,31 @@ class DeliveryOrderTests(TestCase):
         self.assertEqual(order.order_details['merchant_name'],'Le Palmier')
         self.assertEqual(websocket.call_count,1)
         self.assertEqual(websocket.call_args.args[2]['requestId'],delivery.pk)
+
+    def test_create_endpoint_returns_saved_request_for_every_delivery_type(self):
+        for category in ['food', 'package', 'documents', 'express']:
+            with self.subTest(category=category):
+                request = APIRequestFactory().post('/', {**self.payload, 'type': category}, format='json')
+                force_authenticate(request, self.user)
+                with patch('Delivery.views.create_offers_for_request', return_value=0), patch('Delivery.views.notify_client_update'):
+                    response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)
+                self.assertEqual(response.status_code, 201)
+                self.assertEqual(response.data['order_details'], {})
+                self.assertEqual(response.data['status'], 'operator_required')
+                self.assertEqual(DeliveryRequest.objects.filter(pk=response.data['id']).count(), 1)
+
+    def test_create_endpoint_preserves_food_details_and_rejects_incomplete_details(self):
+        request = APIRequestFactory().post('/', {**self.payload, 'order_details': DETAILS}, format='json')
+        force_authenticate(request, self.user)
+        with patch('Delivery.views.create_offers_for_request', return_value=1):
+            response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['order_details']['kind'], 'restaurant')
+        self.assertEqual(response.data['order_details']['reference'], 'BE-123')
+        self.assertEqual(response.data['status'], 'searching')
+        before = DeliveryRequest.objects.count()
+        request = APIRequestFactory().post('/', {**self.payload, 'order_details': {}}, format='json')
+        force_authenticate(request, self.user)
+        response = DeliveryRequestViewSet.as_view({'post': 'create'})(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(DeliveryRequest.objects.count(), before)

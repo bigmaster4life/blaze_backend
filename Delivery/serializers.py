@@ -73,6 +73,11 @@ class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
 
         return attrs
 
+    def to_representation(self, instance):
+        # Creation validates structured input; stored legacy/parcel details may be {}.
+        # Use the same output contract as GET, including the saved dispatch status.
+        return DeliveryRequestOutSerializer(instance, context=self.context).data
+
     def create(self, validated_data):
         user = self.context["request"].user
 
