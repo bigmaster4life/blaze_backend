@@ -27,7 +27,7 @@ from .serializers import (
     DeliveryDirectionsOutSerializer,
 )
 
-from .services.dispatch import create_offers_for_request, expire_offers_and_request_if_needed
+from .services.dispatch import create_offers_for_request, expire_offers_and_request_if_needed, publish_delivery_status
 from django.contrib.auth import authenticate, get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.password_validation import validate_password
@@ -259,7 +259,7 @@ class DeliveryDriverViewSet(viewsets.ViewSet):
         req.save(update_fields=["status", "updated_at"])
 
         try:
-            notify_client_update(req.user, "delivery", req.id, req.status)
+            publish_delivery_status(req)
         except Exception :
             pass  # ne bloque pas l’opération principale
 
@@ -297,7 +297,7 @@ class DeliveryDriverViewSet(viewsets.ViewSet):
                 "updated_at"
             ])
         try:
-            notify_client_update(req.user, "delivery", req.id, req.status)
+            publish_delivery_status(req)
         except Exception :
             pass  # ne bloque pas l’opération principale
 
@@ -336,7 +336,7 @@ class DeliveryRequestViewSet(mixins.CreateModelMixin,
             req.status = DeliveryRequest.STATUS_NO_DRIVER
             req.save(update_fields=["status", "updated_at"])
             try:
-                notify_client_update(req.user, "delivery", req.id, req.status)
+                publish_delivery_status(req)
             except Exception :
                 pass  # ne bloque pas l’opération principale
             return
@@ -365,7 +365,7 @@ class DeliveryRequestViewSet(mixins.CreateModelMixin,
         req.save(update_fields=["status", "updated_at"])
 
         try:
-            notify_client_update(req.user, "delivery", req.id, req.status)
+            publish_delivery_status(req)
         except Exception:
             pass
 
@@ -508,7 +508,7 @@ class DeliveryOfferViewSet(mixins.ListModelMixin,
                 responded_at=now,
             )
         try:
-            notify_client_update(req.user, "delivery", req.id, req.status)
+            publish_delivery_status(req)
         except Exception :
             pass  # ne bloque pas l’opération principale
 

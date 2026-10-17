@@ -131,6 +131,15 @@ def _broadcast_request_status_to_client(req: DeliveryRequest) -> None:
         logger.warning("[DELIVERY][WS] _broadcast_request_status_to_client error req=%s err=%s", getattr(req, "id", None), e)
 
 
+def publish_delivery_status(req):
+    """Publish committed state immediately; Firebase network I/O runs separately."""
+    def publish():
+        _broadcast_request_status_to_client(req)
+        from notifications.delivery_tasks import submit_delivery_status
+        submit_delivery_status(req.id, req.status)
+    transaction.on_commit(publish)
+
+
 # ─────────────────────────────────────────────
 # Dispatch logic
 # ─────────────────────────────────────────────
@@ -236,13 +245,12 @@ def create_offers_for_request(req: DeliveryRequest) -> int:
                 expires_at=expires_at,
             )
 
+            _broadcast_offer_created(offer)
             try:
                 notify_delivery_driver_new_order(d, req)
             except Exception:
                 logger.exception("[FCM][DELIVERY] notify_delivery_driver_new_order crashed req=%s driver=%s", req.id, d.id)
                 pass
-
-            _broadcast_offer_created(offer)
 
             logger.info(
                 "[DELIVERY][DISPATCH] req=%s -> offer=%s driver=%s dist=%.2f score=%.2f clustered=%s",
@@ -377,13 +385,7 @@ def accept_delivery_offer(offer_id: int, user):
         offer.id, req.id, driver.id, active_count, new_active, driver.is_available
     )
 
-    # notify client: FCM + WS
-    try:
-        notify_client_update(req.user, "delivery", req.id, req.status)
-    except Exception:
-        pass
-
-    _broadcast_request_status_to_client(req)
+    publish_delivery_status(req)
 
     return {
         "ok": True,

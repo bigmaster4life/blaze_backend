@@ -223,3 +223,25 @@ class DeliveryOrderTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data['status'], 'no_driver')
         self.assertFalse(DeliveryOffer.objects.filter(request_id=response.data['id']).exists())
+
+    def test_accept_publishes_committed_status_without_waiting_for_firebase(self):
+        delivery = self.make_request()
+        offer = DeliveryOffer.objects.create(request=delivery, driver=self.driver, expires_at=timezone.now()+timedelta(minutes=5))
+        request = APIRequestFactory().post('/')
+        force_authenticate(request, self.driver_user)
+        with patch.object(dispatch_module, '_ws_send_group') as websocket, patch('notifications.delivery_tasks.submit_delivery_status') as submit:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = DeliveryOfferViewSet.as_view({'post': 'accept'})(request, pk=offer.pk)
+                self.assertEqual(response.status_code, 200)
+                websocket.assert_not_called()
+            self.assertTrue(any(call.args[0] == f'user.{self.user.pk}' and call.args[1] == 'delivery.request.update' and call.args[2]['status'] == 'assigned' for call in websocket.call_args_list))
+            submit.assert_called_once_with(delivery.pk, 'assigned')
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.assigned_driver_id, self.driver.pk)
+
+    def test_offer_websocket_is_sent_before_firebase_network_call(self):
+        delivery = self.make_request()
+        events = []
+        with patch.object(dispatch_module, '_ws_send_group', side_effect=lambda *a: events.append('ws')), patch.object(dispatch_module, 'notify_delivery_driver_new_order', side_effect=lambda *a: events.append('push')):
+            self.assertEqual(create_offers_for_request(delivery), 1)
+        self.assertEqual(events, ['ws', 'push'])

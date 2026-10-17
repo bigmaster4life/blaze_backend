@@ -1,6 +1,7 @@
 import os
 import json
 import requests
+from threading import Lock
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 from notifications.models import Device
@@ -27,12 +28,24 @@ FCM_ENDPOINT = f"https://fcm.googleapis.com/v1/projects/{FCM_PROJECT_ID}/message
 # AUTH
 # ==============================
 
+_credentials = None
+_credentials_lock = Lock()
+
+
 def get_access_token():
-    credentials = service_account.Credentials.from_service_account_file(
-        FCM_SERVICE_ACCOUNT_FILE, scopes=FCM_SCOPES
-    )
-    credentials.refresh(Request())
-    return credentials.token
+    global _credentials
+    with _credentials_lock:
+        if _credentials is None:
+            _credentials = service_account.Credentials.from_service_account_file(
+                FCM_SERVICE_ACCOUNT_FILE, scopes=FCM_SCOPES
+            )
+        if not _credentials.valid:
+            transport = Request()
+            def bounded_request(*args, **kwargs):
+                kwargs['timeout'] = 5
+                return transport(*args, **kwargs)
+            _credentials.refresh(bounded_request)
+        return _credentials.token
 
 
 # ==============================
@@ -111,7 +124,7 @@ def payload_vtc_new_ride(ride_id: int):
 # ✅ AJOUT LIVREUR – PAYLOAD COMPLET
 # ==============================
 
-def payload_delivery_new_order(delivery_request):
+def payload_delivery_new_order(delivery_request, offer_id=None):
     details = getattr(delivery_request, 'order_details', None) or {}
     merchant = details.get('merchant_name') if isinstance(details, dict) else None
     pickup = merchant or delivery_request.pickup_label
@@ -124,21 +137,23 @@ def payload_delivery_new_order(delivery_request):
             "priority": "HIGH",
             "ttl": "60s",
             "notification": {
-                "channel_id": "delivery",
+                "channel_id": "be_delivery_offers_v2",
                 "tag": f"delivery_{delivery_request.id}",
                 "visibility": "PUBLIC",
                 "sound": "default"
             }
         },
+        "apns": {"headers": {"apns-priority": "10"}, "payload": {"aps": {"sound": "default"}}},
         "data": {
             "type": "delivery.new",
-            "delivery_request_id": str(delivery_request.id)
+            "delivery_request_id": str(delivery_request.id),
+            **({"delivery_offer_id": str(offer_id)} if offer_id else {})
         }
     }
 
 
 def payload_client_status_update(object_type: str, object_id: int, status: str):
-    return {
+    payload = {
         "data": {
             "type": "client.update",
             "object_type": object_type,  # ride | delivery
@@ -151,6 +166,14 @@ def payload_client_status_update(object_type: str, object_id: int, status: str):
             "priority": "HIGH"
         }
     }
+
+    if object_type == 'delivery':
+        body = {'assigned': 'Un livreur a accepté votre commande.', 'picked_up': 'Votre commande a été récupérée et est en route.', 'delivered': 'Votre commande a été livrée.', 'cancelled': 'Votre livraison a été annulée.', 'no_driver': 'Aucun livreur disponible à proximité du retrait.'}.get(status, 'Votre livraison a été mise à jour.')
+        payload['notification'] = {'title': 'Votre livraison Be', 'body': body}
+        payload['data'].update(title='Votre livraison Be', body=body)
+        payload['android']['notification'] = {'sound': 'default', 'tag': f'delivery_status_{object_id}'}
+        payload['apns'] = {'headers': {'apns-priority': '10'}, 'payload': {'aps': {'sound': 'default'}}}
+    return payload
 
 
 # ==============================
@@ -197,7 +220,8 @@ def notify_delivery_driver_new_order(driver, delivery_request):
         print("⚠️ Aucun device enregistré pour ce livreur")
         return False
 
-    payload = payload_delivery_new_order(delivery_request)
+    offer_id = delivery_request.offers.filter(driver=driver, status='pending').values_list('id', flat=True).first()
+    payload = payload_delivery_new_order(delivery_request, offer_id)
 
     sent = False
     for token in tokens:
@@ -207,10 +231,17 @@ def notify_delivery_driver_new_order(driver, delivery_request):
 
 
 def notify_client_update(client, object_type: str, object_id: int, status: str):
-    if not client.fcm_token:
-        return False
     payload = payload_client_status_update(object_type, object_id, status)
-    return send_fcm_message(client.fcm_token, payload)
+    if object_type == 'delivery':
+        tokens = list(Device.objects.filter(user=client, is_active=True).values_list('token', flat=True))
+        if not tokens and client.fcm_token:
+            tokens = [client.fcm_token]
+    else:
+        tokens = [client.fcm_token] if client.fcm_token else []
+    sent = False
+    for token in dict.fromkeys(tokens):
+        sent = send_fcm_message(token, payload) or sent
+    return sent
 
 
 def payload_chat_message(title: str, body: str, ride_id: int, sender: str):
