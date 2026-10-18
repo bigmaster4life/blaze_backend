@@ -47,10 +47,13 @@ def record_cancellation(obj, actor, before, reason):
         context['position_age_seconds']=round(age)
         if age<=120 and None not in (lat,lng,obj.pickup_lat,obj.pickup_lng):
             import math
-            a,b,c,d=map(math.radians,(lat,lng,obj.pickup_lat,obj.pickup_lng))
-            value=math.sin((c-a)/2)**2+math.cos(a)*math.cos(c)*math.sin((d-b)/2)**2
-            distance=6371000*2*math.asin(math.sqrt(min(1,max(0,value))))
-            if math.isfinite(distance): context['pickup_distance_m']=round(distance)
+            coords=(lat,lng,obj.pickup_lat,obj.pickup_lng)
+            valid=all(math.isfinite(x) for x in coords) and -90<=lat<=90 and -180<=lng<=180 and -90<=obj.pickup_lat<=90 and -180<=obj.pickup_lng<=180
+            if valid:
+                a,b,c,d=map(math.radians,coords)
+                value=math.sin((c-a)/2)**2+math.cos(a)*math.cos(c)*math.sin((d-b)/2)**2
+                distance=6371000*2*math.asin(math.sqrt(min(1,max(0,value))))
+                if math.isfinite(distance): context['pickup_distance_m']=round(distance)
     event, created = CancellationRecord.objects.get_or_create(**({'ride':obj} if is_ride else {'delivery':obj}), defaults={
         'actor':actor,'partner_id':partner_id,'actor_role':'customer' if customer else 'partner' if partner_id==actor.pk else 'staff',
         'reason':reason['reason'],'note':reason['note'],'status_before':before,'context':context,

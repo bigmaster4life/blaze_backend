@@ -126,3 +126,10 @@ class CancellationTests(TestCase):
         self.delivery(status='picked_up')
         self.assertEqual(self.cancel(obj).status_code,200)
         self.courier.refresh_from_db();self.assertFalse(self.courier.is_available)
+
+    def test_invalid_gps_is_ignored_without_blocking_cancellation(self):
+        from RideVTC.models import DriverPresence
+        DriverPresence.objects.create(driver=self.partner,lat=float('inf'),lng=9,location_updated_at=timezone.now())
+        obj=self.ride();obj.pickup_lat=0.4;obj.pickup_lng=9.4;obj.save()
+        self.assertEqual(self.cancel(obj).status_code,200)
+        self.assertNotIn('pickup_distance_m',obj.cancellation_record.context)
