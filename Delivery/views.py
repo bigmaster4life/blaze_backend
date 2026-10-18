@@ -636,9 +636,17 @@ class DeliveryDriverLocationViewSet(viewsets.ViewSet):
         if lat is None or lng is None:
             return Response({"detail": "lat/lng required"}, status=400)
 
-        delivery_driver.last_lat = float(lat)
-        delivery_driver.last_lng = float(lng)
-        delivery_driver.save(update_fields=["last_lat", "last_lng", "updated_at"])
+        import math
+        try:
+            lat, lng = float(lat), float(lng)
+        except (TypeError, ValueError):
+            return Response({"detail": "Coordonnées invalides."}, status=400)
+        if not (math.isfinite(lat) and math.isfinite(lng) and -90 <= lat <= 90 and -180 <= lng <= 180):
+            return Response({"detail": "Coordonnées invalides."}, status=400)
+        delivery_driver.last_lat = lat
+        delivery_driver.last_lng = lng
+        delivery_driver.last_location_update = timezone.now()
+        delivery_driver.save(update_fields=["last_lat", "last_lng", "last_location_update", "updated_at"])
 
         return Response({"ok": True})
 

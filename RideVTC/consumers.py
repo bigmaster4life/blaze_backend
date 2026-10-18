@@ -404,6 +404,8 @@ class DriverConsumer(AsyncJsonWebsocketConsumer):
             await _presence_touch(int(self.user_id))
             await database_sync_to_async(self._db_presence_touch)()
             if lat is not None and lng is not None:
+                from .supervision_presence import record_position
+                await database_sync_to_async(record_position)(int(self.user_id), lat, lng)
                 try:
                     from RideVTC.models import RideVehicle
                     def _update():
@@ -428,7 +430,7 @@ class DriverConsumer(AsyncJsonWebsocketConsumer):
             except:
                 logger.warning(f"[WS][Driver] invalid lat/lng from driver#{self.user_id}: {content}")
                 return
-            await database_sync_to_async(self._update_driver_location)(lat, lng)
+            await self._update_driver_location(lat, lng)
             logger.info(f"[GPS] driver#{self.user_id} → lat={lat} lng={lng}")
             return
 
@@ -715,6 +717,9 @@ class DriverConsumer(AsyncJsonWebsocketConsumer):
     
     @database_sync_to_async
     def _update_driver_location(self, lat, lng):
+        from .supervision_presence import record_position
+        if not record_position(int(self.user_id), lat, lng):
+            return
         from RideVTC.models import RideVehicle
         try:
             v = RideVehicle.objects.get(driver_id=int(self.user_id))

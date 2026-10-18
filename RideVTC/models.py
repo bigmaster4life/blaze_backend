@@ -197,6 +197,7 @@ class DriverPresence(models.Model):
         on_delete=models.CASCADE,
         related_name="presence"
     )
+    location_updated_at = models.DateTimeField(null=True, blank=True)
     city = models.CharField(max_length=50, default="", blank=True)
     is_online = models.BooleanField(default=False)
     last_seen = models.DateTimeField(null=True, blank=True)

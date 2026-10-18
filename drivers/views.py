@@ -442,6 +442,11 @@ class DriverPresenceView(APIView):
             driver.last_latitude = lat
             driver.last_longitude = lng
         driver.save()
+        from RideVTC.models import DriverPresence
+        DriverPresence.objects.update_or_create(driver=request.user, defaults={"is_online": online, "last_seen": timezone.now()})
+        if lat is not None and lng is not None:
+            from RideVTC.supervision_presence import record_position
+            record_position(request.user.pk, lat, lng)
 
         return Response({"detail": "Présence mise à jour.", "online": driver.is_online})
 

@@ -293,6 +293,8 @@ class RideViewSet(viewsets.ModelViewSet):
         ride.driver_lat = lat
         ride.driver_lng = lng
         ride.save(update_fields=['driver_lat', 'driver_lng'])
+        from .supervision_presence import record_position
+        record_position(request.user.pk, lat, lng)
 
         if channel_layer:
             payload = {
@@ -1289,6 +1291,9 @@ class DriverRideLocationView(APIView):
         ride.driver_lat = lat
         ride.driver_lng = lng
         ride.save(update_fields=['driver_lat', 'driver_lng'])
+        if ride.driver_id == request.user.pk:
+            from .supervision_presence import record_position
+            record_position(request.user.pk, lat, lng)
         return Response({"ok": True})
     
 # views.py (extraits)
@@ -1671,5 +1676,8 @@ class DriverPresenceView(APIView):
             pres.city = city
 
         pres.save()
+        if lat is not None and lng is not None:
+            from .supervision_presence import record_position
+            record_position(user.pk, lat, lng)
 
         return Response({"ok": True})
