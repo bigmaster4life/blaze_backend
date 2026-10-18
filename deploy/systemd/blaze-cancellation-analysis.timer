@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry pending Blaze cancellation screening every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+RandomizedDelaySec=5
+Unit=blaze-cancellation-analysis.service
+
+[Install]
+WantedBy=timers.target

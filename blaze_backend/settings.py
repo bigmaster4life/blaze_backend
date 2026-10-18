@@ -356,3 +356,6 @@ RIDE_MAX_DISTANCE_KM = 30.0     # rayon maximum
 DRIVER_PRESENCE_TIMEOUT_S = 120  # délai avant de considérer un chauffeur offline
 
 
+
+# Enable only after updated mobile clients have been distributed.
+CANCELLATION_REASON_REQUIRED = env.bool('CANCELLATION_REASON_REQUIRED', default=False)

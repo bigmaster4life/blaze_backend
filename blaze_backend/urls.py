@@ -26,6 +26,7 @@ from rest_framework.routers import DefaultRouter
 from vehicles.views import VehicleViewSet, RentalPromoView
 from .health import healthz, readyz, healthz_full
 from .supervision import SupervisionView
+from analytics.reviews import AlertListView, AlertDetailView
 from analytics.views import AnalyticsViewSet
 from drivers.views import DriverDocsMeView, DriverEarningsSummary
 from notifications.views import RegisterDeviceView
@@ -50,6 +51,8 @@ urlpatterns = [
 
     path('admin/', admin.site.urls),
     path('api/supervision/', SupervisionView.as_view()),
+    path('api/cancellation-alerts/', AlertListView.as_view()),
+    path('api/cancellation-alerts/<int:pk>/', AlertDetailView.as_view()),
 
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),

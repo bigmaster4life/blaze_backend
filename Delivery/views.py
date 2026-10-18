@@ -444,29 +444,38 @@ class DeliveryRequestViewSet(mixins.CreateModelMixin,
         req.refresh_from_db()
         return Response(DeliveryRequestOutSerializer(req).data)
     
+    @transaction.atomic
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
-        req = self.get_object()
-
-        if req.status not in [
-            DeliveryRequest.STATUS_SEARCHING,
-            DeliveryRequest.STATUS_OPERATOR_REQUIRED,
-        ]:
-            return Response(
-                {"detail": "Impossible d’annuler cette demande."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+        from analytics.cancellations import parse_reason, record_cancellation
+        from django.shortcuts import get_object_or_404
+        req = get_object_or_404(self.get_queryset().select_for_update(), pk=pk)
+        if req.status == DeliveryRequest.STATUS_CANCELLED:
+            return Response({"ok": True, "status": req.status})
+        if req.status not in ['pending','searching','operator_required','assigned']:
+            return Response({"detail": "Cette livraison ne peut plus être annulée simplement. Contactez l’assistance."}, status=409)
+        if (req.is_paid or req.cash_received_at or req.purchase_funds_received_at or
+                req.purchase_advance_accepted_at or req.purchase_actual_amount):
+            return Response({"detail": "Un encaissement ou une avance d’achat est enregistré. Contactez l’assistance pour régler l’annulation."}, status=409)
+        before = req.status
+        reason = parse_reason(request.data, customer=True, status_before=before)
         req.status = DeliveryRequest.STATUS_CANCELLED
         req.save(update_fields=["status", "updated_at"])
-
-        try:
-            publish_delivery_status(req)
-        except Exception:
-            pass
-
+        record_cancellation(req, request.user, before, reason)
+        if req.assigned_driver_id:
+            driver = DeliveryDriver.objects.select_for_update().get(pk=req.assigned_driver_id)
+            if not DeliveryRequest.objects.filter(assigned_driver=driver, status__in=['assigned','picked_up']).exclude(pk=req.pk).exists():
+                driver.is_available = True
+                driver.save(update_fields=['is_available','updated_at'])
+        # Acceptance locks offer -> request: retire offers only after releasing the request lock.
+        transaction.on_commit(lambda: DeliveryOffer.objects.filter(request_id=req.pk,status=DeliveryOffer.STATUS_PENDING).update(status=DeliveryOffer.STATUS_EXPIRED, responded_at=timezone.now()), robust=True)
+        transaction.on_commit(lambda: publish_delivery_status(req), robust=True)
+        if req.assigned_driver_id and req.assigned_driver.user_id:
+            from .services.dispatch import _ws_send_group
+            partner_user_id = req.assigned_driver.user_id
+            transaction.on_commit(lambda: _ws_send_group(f'delivery.driver.{partner_user_id}', 'delivery.request.update', {'request_id':req.pk,'status':'cancelled','assigned_driver_id':req.assigned_driver_id}), robust=True)
         return Response({"ok": True, "status": req.status})
-    
+
     @action(detail=True, methods=["get"])
     def driver_location(self, request, pk=None):
         req = self.get_object()

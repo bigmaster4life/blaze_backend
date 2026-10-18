@@ -276,7 +276,7 @@ class _RetryCancellation(Exception):
     pass
 
 
-def cancel_booking(ride_id, user):
+def cancel_booking(ride_id, user, reason_data=None):
     if not Ride.objects.filter(pk=ride_id, ride_mode='shared').exists():
         return None
     # A pending reservation can acquire membership while cancellation waits
@@ -295,9 +295,17 @@ def cancel_booking(ride_id, user):
                     return ride
                 if ride.status == 'in_progress':
                     raise ValidationError('Le client est à bord. Effectuez sa dépose avant de terminer.')
+                if ride.payments.filter(status='SUCCESS').exists():
+                    raise ValidationError('Un paiement est enregistré. Contactez l’assistance pour régler l’annulation.')
+                before = ride.status
+                if reason_data is not None:
+                    from analytics.cancellations import parse_reason, record_cancellation
+                    reason = parse_reason(reason_data, customer=ride.user_id == user.pk, status_before=before)
                 ride.status = 'cancelled'
                 ride.dispatch_status = 'cancelled'
                 ride.save(update_fields=['status', 'dispatch_status'])
+                if reason_data is not None:
+                    record_cancellation(ride, user, before, reason)
                 if trip:
                     trip.stops = [s for s in trip.stops if s['ride_id'] != ride.pk]
                     trip.version += 1

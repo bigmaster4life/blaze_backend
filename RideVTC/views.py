@@ -647,9 +647,15 @@ class RideViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     @action(detail=True, methods=["post"], url_path="cancel")
     def cancel(self, request, pk=None):
+        from analytics.cancellations import parse_reason, record_cancellation
         from .shared import cancel_booking
-        shared_ride = cancel_booking(pk, request.user)
-        if shared_ride:
+        initial = get_object_or_404(Ride, pk=pk)
+        if request.user.pk not in (initial.user_id, initial.driver_id) and not request.user.is_staff:
+            return Response({"detail": "Forbidden"}, status=403)
+        if initial.status in {"cancelled", "completed", "finished"}:
+            return Response({"id": initial.pk, "status": initial.status})
+        if initial.ride_mode == 'shared':
+            shared_ride = cancel_booking(pk, request.user, reason_data=request.data)
             return Response({"id": shared_ride.pk, "status": shared_ride.status})
         ride = get_object_or_404(Ride.objects.select_for_update(), pk=pk)
 
@@ -661,7 +667,16 @@ class RideViewSet(viewsets.ModelViewSet):
         if ride.status in {"cancelled", "completed", "finished"}:
             return Response({"id": ride.id, "status": ride.status}, status=200)
 
+        if ride.status == 'in_progress':
+            return Response({'detail': 'La course a démarré. Contactez l’assistance pour interrompre la prestation.'}, status=409)
+        if ride.payments.filter(status='SUCCESS').exists():
+            return Response({'detail': 'Un paiement est enregistré. Contactez l’assistance pour régler l’annulation.'}, status=409)
+        before = ride.status
+        reason = parse_reason(request.data, customer=is_customer, status_before=before)
         ride.status = "cancelled"
+        ride.dispatch_status = 'cancelled'
+        ride.save(update_fields=['dispatch_status'])
+        record_cancellation(ride, request.user, before, reason)
         if hasattr(ride, "cancelled_at"):
             ride.cancelled_at = timezone.now()
             ride.save(update_fields=["status", "cancelled_at"])

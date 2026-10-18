@@ -1,0 +1,13 @@
+[Unit]
+Description=Blaze cancellation screening (no automatic sanctions)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=blaze
+Group=www-data
+WorkingDirectory=/home/blaze/blaze/blaze_backend
+Environment=ENV_FILE=/home/blaze/blaze/blaze_backend/.env.prod
+Environment=AUTOBAHN_USE_NVX=0
+ExecStart=/home/blaze/blaze/blaze_backend/.venv/bin/python manage.py process_cancellation_alerts --limit 200
+TimeoutStartSec=90
