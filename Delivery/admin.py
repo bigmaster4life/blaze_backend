@@ -104,3 +104,21 @@ class DeliveryPaymentAllocationAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+from .models import Restaurant, RestaurantMenuItem, RestaurantOrder, RestaurantOrderEvent, CustomerReceipt, RestaurantSettlement
+@admin.register(Restaurant)
+class RestaurantAdmin(admin.ModelAdmin):
+    list_display=('name','city','is_active','is_open','periodic_payment')
+    list_filter=('city','is_active','is_open')
+    search_fields=('name',)
+@admin.register(RestaurantMenuItem)
+class MenuAdmin(admin.ModelAdmin):
+    list_display=('name','restaurant','price','is_available')
+    list_filter=('restaurant','is_available')
+    search_fields=('name',)
+@admin.register(RestaurantOrder,RestaurantOrderEvent,CustomerReceipt,RestaurantSettlement)
+class ReadonlyRestaurantAdmin(admin.ModelAdmin):
+    def get_readonly_fields(self,request,obj=None):return [field.name for field in self.model._meta.fields]
+    def has_add_permission(self,request):return False
+    def has_delete_permission(self,request,obj=None):return False

@@ -14,6 +14,8 @@ MAX_AGE = 300
 
 def fingerprint(data):
     route = {key: data.get(key) for key in ('type', 'vehicle_type', 'pickup_zone', 'dropoff_zone', 'van_service')}
+    if data.get('restaurant_id'):
+        route['restaurant_order'] = data.get('order_details')
     for key in ('pickup_lat', 'pickup_lng', 'dropoff_lat', 'dropoff_lng'):
         value = data.get(key)
         route[key] = round(float(value), 6) if value is not None else None
@@ -34,11 +36,14 @@ def issue_quote(data, user):
         except Exception as exc:
             raise ValidationError({'detail': 'Le tarif ne peut pas être calculé pour le moment. Réessayez.'}) from exc
         distance = meters / 1000
-        draft_data = {key: value for key, value in data.items() if key not in ('quote_token', '_quote', 'distance_km')}
+        draft_data = {key: value for key, value in data.items() if key not in ('quote_token', '_quote', 'distance_km', 'restaurant_id', 'cart', 'checkout_id')}
         draft = DeliveryRequest(**draft_data, user=user, distance_km=distance)
         price = draft.compute_estimated_price()
+    food_total = (data.get('order_details') or {}).get('food_total', 0)
+    if data.get('restaurant_id') and price is not None and price + food_total > 1000000:
+        raise ValidationError({'detail':'Le total repas et livraison ne peut pas dépasser 1 000 000 FCFA. Réduisez votre panier.'})
     payload = {'user_id': user.pk, 'route': fingerprint(data), 'distance_km': distance, 'price': price}
-    return {'quote_token': signing.dumps(payload, salt=SALT, compress=True), 'delivery_price': price, 'distance_km': distance, 'expires_in': MAX_AGE, 'payment_method': 'cash', 'operator_quote_required': price is None}
+    return {'quote_token': signing.dumps(payload, salt=SALT, compress=True), 'delivery_price': price, 'food_total': food_total, 'total': price + food_total if price is not None else None, 'distance_km': distance, 'expires_in': MAX_AGE, 'payment_method': 'cash', 'operator_quote_required': price is None}
 
 
 def read_quote(token, data, user):

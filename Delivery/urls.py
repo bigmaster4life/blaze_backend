@@ -14,7 +14,13 @@ from .views import (
     DeliveryDirectionsView,
 )
 
+from .restaurant_api import RestaurantCatalog, RestaurantAdmin, MenuAdmin, OperatorOrders
+from .receipts import ReceiptView, ReceiptList
 router = DefaultRouter()
+router.register(r'delivery/restaurants',RestaurantCatalog,basename='restaurants')
+router.register(r'delivery/admin/restaurants',RestaurantAdmin,basename='admin-restaurants')
+router.register(r'delivery/admin/menu',MenuAdmin,basename='admin-menu')
+router.register(r'delivery/operator/restaurant-orders',OperatorOrders,basename='restaurant-orders')
 
 # ============================================================
 # CLIENT
@@ -61,6 +67,8 @@ router.register(
 )
 
 urlpatterns = [
+    path('receipts/',ReceiptList.as_view()),
+    path('receipts/<str:service>/<int:pk>/',ReceiptView.as_view()),
     path("", include(router.urls)),
     # ✅ AUTH LIVREUR
     path("delivery/drivers/login/", DeliveryDriverLoginView.as_view(), name="delivery-driver-login"),

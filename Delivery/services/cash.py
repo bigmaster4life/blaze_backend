@@ -27,6 +27,10 @@ def fee(req):
 
 
 def check_pickup_payment(req):
+    from Delivery.restaurant_api import food_order
+    order=food_order(req)
+    if order and (order.state!='ready' or not order.funding):
+        raise ValidationError({'detail':'L’opérateur doit confirmer la préparation et le règlement du restaurant.'})
     if req.payment_payer == 'sender' and not req.is_paid:
         raise ValidationError({'detail': 'Confirmez les frais de livraison reçus de l’expéditeur avant de partir.'})
     details = purchases(req)

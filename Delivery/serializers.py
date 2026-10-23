@@ -32,6 +32,12 @@ class DeliveryOrderDetailsSerializer(serializers.Serializer):
 
 
 class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
+    from .restaurant_api import CartLine
+    restaurant_id = serializers.IntegerField(min_value=1, required=False, write_only=True)
+    cart = CartLine(many=True, required=False, write_only=True)
+    checkout_id = serializers.UUIDField(required=False, write_only=True)
+    payment_timing = serializers.ChoiceField(choices=['on_delivery', 'now'], default='on_delivery', write_only=True)
+
     quote_token = serializers.CharField(required=False, write_only=True)
     payment_method = serializers.ChoiceField(choices=['cash'], required=False, default='cash')
     payment_payer = serializers.ChoiceField(choices=['sender', 'recipient'], required=False, default='sender')
@@ -39,7 +45,7 @@ class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = DeliveryRequest
         fields = [
-            "id", "payment_method", "payment_payer", "quote_token",
+            "id", "payment_method", "payment_payer", "quote_token", "restaurant_id", "cart", "checkout_id", "payment_timing",
             "type",
             "vehicle_type",
 
@@ -54,6 +60,18 @@ class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
+        timing = attrs.pop('payment_timing', 'on_delivery')
+        if timing != 'on_delivery':
+            raise serializers.ValidationError({'payment_timing':'Les paiements à la commande ne sont pas encore activés. Aucun montant n’a été débité.'})
+        if attrs.get('restaurant_id'):
+            from .restaurant_api import canonical_cart
+            if attrs.get('type') != 'food' or attrs.get('vehicle_type') == 'van' or not attrs.get('checkout_id'):
+                raise serializers.ValidationError('Une commande restaurant exige le type nourriture, moto/voiture et une référence de commande.')
+            restaurant, lines, total = canonical_cart(attrs['restaurant_id'], attrs.get('cart', []))
+            attrs.update(pickup_label=restaurant.address, pickup_lat=restaurant.latitude, pickup_lng=restaurant.longitude, pickup_zone=restaurant.city, payment_payer='recipient')
+            attrs['order_details']={'kind':'restaurant','merchant_name':restaurant.name,'items':'\n'.join(f"{line['quantity']} × {line['name']}" for line in lines),'purchase_mode':'prepaid','reference':'Commande gérée par Be','restaurant_id':restaurant.pk,'menu_lines':lines,'food_total':total,'managed_by_be':True}
+        elif attrs.get('cart') or attrs.get('checkout_id'):
+            raise serializers.ValidationError('Choisissez un restaurant pour ce panier.')
         vehicle_type = attrs.get("vehicle_type")
         if attrs.get("order_details") and attrs.get("type", "package") != "food":
             raise serializers.ValidationError({"order_details": "Ces détails concernent les repas et les courses."})
@@ -89,8 +107,23 @@ class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
         # Use the same output contract as GET, including the saved dispatch status.
         return DeliveryRequestOutSerializer(instance, context=self.context).data
 
+    @transaction.atomic
     def create(self, validated_data):
+        from .models import RestaurantOrder, Restaurant
+        from .restaurant_api import checkout_fingerprint
         user = self.context["request"].user
+        restaurant_id=validated_data.pop('restaurant_id',None)
+        validated_data.pop('cart',None)
+        checkout_id=validated_data.pop('checkout_id',None)
+        fingerprint=checkout_fingerprint(validated_data)
+        if restaurant_id:
+            # Serialise retries from this account before checking the unique checkout key.
+            User.objects.select_for_update().get(pk=user.pk)
+            previous=RestaurantOrder.objects.filter(checkout_id=checkout_id).first()
+            if previous:
+                if previous.request.user_id != user.pk or previous.cart_fingerprint != fingerprint:
+                    raise serializers.ValidationError('Référence de commande déjà utilisée avec des détails différents.')
+                return previous.request
         quote = validated_data.pop('_quote', None)
         if quote:
             validated_data['distance_km'] = quote['distance_km']
@@ -104,7 +137,12 @@ class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
 
         req = DeliveryRequest.objects.create(user=user, **validated_data)
 
-        if req.vehicle_type == DeliveryDriver.VEHICLE_VAN:
+        if restaurant_id:
+            req.status = DeliveryRequest.STATUS_OPERATOR_REQUIRED
+            req.estimated_price = req.compute_estimated_price()
+            details=req.order_details
+            RestaurantOrder.objects.create(request=req, restaurant_id=restaurant_id, checkout_id=checkout_id, cart_fingerprint=fingerprint, restaurant_name=details['merchant_name'], lines=details['menu_lines'], food_total=details['food_total'])
+        elif req.vehicle_type == DeliveryDriver.VEHICLE_VAN:
             req.status = DeliveryRequest.STATUS_OPERATOR_REQUIRED
             req.estimated_price = 0
         else:
@@ -116,6 +154,12 @@ class DeliveryRequestCreateSerializer(serializers.ModelSerializer):
 
 
 class DeliveryRequestOutSerializer(serializers.ModelSerializer):
+    restaurant_order = serializers.SerializerMethodField()
+    def get_restaurant_order(self,obj):
+        from .restaurant_api import food_order,public_order
+        order=food_order(obj)
+        return public_order(order) if order else None
+
     payment_allocation = serializers.SerializerMethodField()
 
     def get_payment_allocation(self, obj):
@@ -138,6 +182,12 @@ class DeliveryRequestOutSerializer(serializers.ModelSerializer):
 # ============================================================
 
 class DeliveryOfferOutSerializer(serializers.ModelSerializer):
+    restaurant_order=serializers.SerializerMethodField()
+    def get_restaurant_order(self,obj):
+        from .restaurant_api import food_order,public_order
+        order=food_order(obj.request)
+        return public_order(order) if order else None
+
     request_id = serializers.IntegerField(source="request.id", read_only=True)
 
     pickup_label = serializers.CharField(source="request.pickup_label", read_only=True)
@@ -169,7 +219,7 @@ class DeliveryOfferOutSerializer(serializers.ModelSerializer):
     class Meta:
         model = DeliveryOffer
         fields = [
-            "id", "payment_method", "payment_payer",
+            "id", "payment_method", "payment_payer", "restaurant_order",
             "request_id",
 
             "pickup_zone",

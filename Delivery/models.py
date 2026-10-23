@@ -349,3 +349,93 @@ class DeliveryPaymentAllocation(models.Model):
     driver_amount = models.DecimalField(max_digits=12, decimal_places=2)
     cash_commission_due = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class Restaurant(models.Model):
+    name = models.CharField(max_length=160)
+    city = models.CharField(max_length=20, choices=CityChoices.choices)
+    address = models.CharField(max_length=200)
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    phone = models.CharField(max_length=30, blank=True)
+    photo = models.ImageField(upload_to='restaurants/', blank=True)
+    is_active = models.BooleanField(default=False)
+    is_open = models.BooleanField(default=False)
+    periodic_payment = models.BooleanField(default=False)
+    settlement_terms = models.CharField(max_length=250, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
+
+
+class RestaurantMenuItem(models.Model):
+    restaurant = models.ForeignKey(Restaurant, on_delete=models.PROTECT, related_name='menu')
+    name = models.CharField(max_length=160)
+    description = models.TextField(blank=True, max_length=1500)
+    category = models.CharField(max_length=80, blank=True)
+    price = models.PositiveIntegerField()
+    photo = models.ImageField(upload_to='restaurant-menu/', blank=True)
+    is_available = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
+
+
+class RestaurantOrder(models.Model):
+    request = models.OneToOneField(DeliveryRequest, on_delete=models.PROTECT, related_name='restaurant_order')
+    restaurant = models.ForeignKey(Restaurant, on_delete=models.PROTECT, related_name='orders')
+    checkout_id = models.UUIDField(unique=True)
+    cart_fingerprint = models.CharField(max_length=64)
+    restaurant_name = models.CharField(max_length=160)
+    lines = models.JSONField(default=list)
+    food_total = models.PositiveIntegerField()
+    state = models.CharField(max_length=16, default='pending', choices=[('pending','À commander'),('confirmed','Commandée'),('ready','Prête')])
+    restaurant_reference = models.CharField(max_length=100, blank=True)
+    funding = models.CharField(max_length=16, blank=True, choices=[('paid','Payé par Blaze'),('contract_due','À régler selon contrat')])
+    settlement_terms = models.CharField(max_length=250, blank=True)
+    restaurant_paid_at = models.DateTimeField(null=True, blank=True)
+    restaurant_payment_reference = models.CharField(max_length=160, blank=True)
+    collected_at = models.DateTimeField(null=True, blank=True)
+    collected_total = models.PositiveIntegerField(null=True, blank=True)
+    cash_remitted_at = models.DateTimeField(null=True, blank=True)
+    cash_remitted_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    cash_remittance_reference = models.CharField(max_length=160, blank=True)
+    settlement = models.ForeignKey('RestaurantSettlement', null=True, blank=True, on_delete=models.PROTECT, related_name='orders')
+    version = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class RestaurantOrderEvent(models.Model):
+    order = models.ForeignKey(RestaurantOrder, on_delete=models.PROTECT, related_name='events')
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    action = models.CharField(max_length=40)
+    details = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class CustomerReceipt(models.Model):
+    # A saved snapshot: later menu / profile edits must never rewrite an issued receipt.
+    import uuid
+    number = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    delivery = models.OneToOneField(DeliveryRequest, null=True, blank=True, on_delete=models.PROTECT)
+    ride = models.OneToOneField('RideVTC.Ride', null=True, blank=True, on_delete=models.PROTECT)
+    snapshot = models.JSONField(default=dict)
+    issued_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.CheckConstraint(condition=(models.Q(delivery__isnull=False, ride__isnull=True) | models.Q(delivery__isnull=True, ride__isnull=False)), name='receipt_exactly_one_service')]
+
+
+class RestaurantSettlement(models.Model):
+    """Evidence of an external payment, never a bank transfer instruction."""
+    import uuid
+    idempotency_key = models.UUIDField(default=uuid.uuid4, unique=True)
+    restaurant = models.ForeignKey(Restaurant, on_delete=models.PROTECT)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    payment_reference = models.CharField(max_length=160)
+    amount = models.PositiveIntegerField()
+    order_versions = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)

@@ -359,3 +359,9 @@ DRIVER_PRESENCE_TIMEOUT_S = 120  # délai avant de considérer un chauffeur offl
 
 # Enable only after updated mobile clients have been distributed.
 CANCELLATION_REASON_REQUIRED = env.bool('CANCELLATION_REASON_REQUIRED', default=False)
+
+# Customer document issuer. Leave the tax identifier empty until supplied by Blaze.
+BLAZE_BILLING_NAME = env('BLAZE_BILLING_NAME', default='Blaze')
+BLAZE_BILLING_ADDRESS = env('BLAZE_BILLING_ADDRESS', default='3e cité Angondjé, commune d’Akanda')
+BLAZE_BILLING_PHONE = env('BLAZE_BILLING_PHONE', default='+24177020273')
+BLAZE_BILLING_TAX_ID = env('BLAZE_BILLING_TAX_ID', default='')

@@ -321,16 +321,24 @@ class DeliveryDriverViewSet(viewsets.ViewSet):
                 return Response(DeliveryRequestOutSerializer(req).data)
             if req.payment_payer != 'sender' and req.status == 'assigned':
                 return Response({'detail': 'Le destinataire règle les frais à la remise, après le retrait.'}, status=400)
-            expected = fee(req)
+            from .restaurant_api import food_order
+            food=food_order(req)
+            delivery_fee=fee(req)
+            expected = delivery_fee + (food.food_total if food else 0)
             if request.data.get('received') is not True or amount(request.data.get('amount')) != expected:
-                return Response({'detail': 'Confirmez le montant exact des frais de livraison reçus en espèces.'}, status=400)
+                return Response({'detail': 'Confirmez le montant exact reçu en espèces (repas inclus pour une commande restaurant Be).'}, status=400)
             driver = DeliveryDriver.objects.select_for_update().get(pk=driver.pk)
             req.is_paid = True
             req.cash_received_at = timezone.now()
-            req.final_price = expected
+            req.final_price = delivery_fee
             req.save(update_fields=['is_paid', 'cash_received_at', 'final_price', 'updated_at'])
             from .services.accounting import record_cash_allocation
-            record_cash_allocation(req, driver, expected)
+            record_cash_allocation(req, driver, delivery_fee)
+            if food:
+                from .models import RestaurantOrderEvent
+                food.collected_at=req.cash_received_at;food.collected_total=expected
+                food.save(update_fields=['collected_at','collected_total'])
+                RestaurantOrderEvent.objects.create(order=food,actor=request.user,action='collect_cash',details={'total':expected,'food':food.food_total,'delivery':delivery_fee})
             publish_delivery_status(req, push=False)
         return Response(DeliveryRequestOutSerializer(req).data)
 
@@ -411,7 +419,10 @@ class DeliveryRequestViewSet(mixins.CreateModelMixin,
         return Response(issue_quote(serializer.validated_data, request.user))
 
     def get_queryset(self):
-        return DeliveryRequest.objects.filter(user=self.request.user).order_by("-id")
+        qs=DeliveryRequest.objects.filter(user=self.request.user).select_related('restaurant_order').order_by('-id')
+        if self.request.query_params.get('restaurant')=='1':
+            qs=qs.filter(restaurant_order__isnull=False)
+        return qs
 
     def get_serializer_class(self):
         if self.action == "create":
@@ -423,6 +434,9 @@ class DeliveryRequestViewSet(mixins.CreateModelMixin,
 
         # VAN = opérateur humain
         if req.status == DeliveryRequest.STATUS_OPERATOR_REQUIRED:
+            return
+
+        if req.status != DeliveryRequest.STATUS_SEARCHING:
             return
 
         # Dispatch auto
@@ -457,6 +471,10 @@ class DeliveryRequestViewSet(mixins.CreateModelMixin,
         if (req.is_paid or req.cash_received_at or req.purchase_funds_received_at or
                 req.purchase_advance_accepted_at or req.purchase_actual_amount):
             return Response({"detail": "Un encaissement ou une avance d’achat est enregistré. Contactez l’assistance pour régler l’annulation."}, status=409)
+        from .restaurant_api import food_order
+        food=food_order(req)
+        if food and food.state!='pending':
+            return Response({'detail':'Le restaurant a déjà confirmé la commande. Contactez Be pour traiter l’annulation et les montants engagés.'},status=409)
         before = req.status
         reason = parse_reason(request.data, customer=True, status_before=before)
         req.status = DeliveryRequest.STATUS_CANCELLED
@@ -703,6 +721,10 @@ class OperatorDeliveryQueueViewSet(mixins.ListModelMixin,
             obj = DeliveryRequest.objects.select_for_update().get(pk=obj.pk)
             delivery_driver = DeliveryDriver.objects.select_for_update().get(pk=delivery_driver.pk)
 
+            from .restaurant_api import food_order
+            food=food_order(obj)
+            if food and food.state!='ready':
+                return Response({'detail':'Le restaurant doit avoir confirmé que la commande est prête.'},status=409)
             if not delivery_driver.is_available:
                 return Response({"error": "Livreur indisponible"}, status=status.HTTP_409_CONFLICT)
 
