@@ -270,6 +270,7 @@ else:
     # Généralement: TLS=True sur port 587 ; SSL=False
     EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
     EMAIL_USE_SSL = env.bool("EMAIL_USE_SSL", default=False)
+    EMAIL_TIMEOUT = env.int("EMAIL_TIMEOUT", default=20)
 
     SERVER_EMAIL = env("SERVER_EMAIL", default=DEFAULT_FROM_EMAIL)
     ADMINS = [("Tech", env("ADMIN_EMAIL", default="bigmaster4life@gmail.com"))]

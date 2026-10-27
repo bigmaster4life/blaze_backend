@@ -1,4 +1,5 @@
 import re
+from smtplib import SMTPAuthenticationError, SMTPServerDisconnected
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -110,8 +111,8 @@ class EmailOTPTests(TestCase):
 
     def test_mail_failure_does_not_leave_challenge(self):
         self.client.raise_request_exception = False
-        with patch("users.email_otp.send_mail", side_effect=RuntimeError("mail unavailable")):
-            self.assertEqual(self.request_code().status_code, 500)
+        with patch("users.email_otp.send_mail", side_effect=SMTPServerDisconnected("mail unavailable")):
+            self.assertEqual(self.request_code().status_code, 503)
         self.assertFalse(EmailChallenge.objects.exists())
 
     def test_reset_password_confirmation_preserves_code(self):
@@ -154,3 +155,36 @@ class EmailOTPTests(TestCase):
         response = self.client.post("/auth/verify-signup-email/", {"phone": "+241074562848", "email": self.email, "code": self.code()}, format="json")
         self.assertEqual(response.status_code, 400)
         self.assertFalse(CustomUser.objects.exists())
+
+    def test_smtp_failure_returns_safe_message_and_allows_retry(self):
+        with patch("users.email_otp.send_mail", side_effect=SMTPAuthenticationError(535, b"private-provider-detail")):
+            with self.assertLogs("users.email_otp", level="ERROR") as logs:
+                response = self.request_code()
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("temporairement indisponible", str(response.data["detail"]))
+        self.assertNotIn("private-provider-detail", str(response.data))
+        self.assertNotIn("private-provider-detail", " ".join(logs.output))
+        self.assertFalse(EmailChallenge.objects.exists())
+        self.assertEqual(self.request_code().status_code, 200)
+
+    def test_timeout_returns_unavailable_and_rolls_back(self):
+        with patch("users.email_otp.send_mail", side_effect=TimeoutError("timeout")):
+            self.assertEqual(self.request_code().status_code, 503)
+        self.assertFalse(EmailChallenge.objects.exists())
+
+    def test_zero_sent_is_not_reported_as_success(self):
+        with patch("users.email_otp.send_mail", return_value=0):
+            self.assertEqual(self.request_code().status_code, 503)
+        self.assertFalse(EmailChallenge.objects.exists())
+
+    def test_failed_resend_preserves_previous_valid_code(self):
+        self.request_code()
+        old_code = self.code()
+        EmailChallenge.objects.update(created_at=timezone.now() - timedelta(seconds=61))
+        previous = EmailChallenge.objects.get()
+        with patch("users.email_otp.send_mail", side_effect=SMTPServerDisconnected("closed")):
+            self.assertEqual(self.request_code().status_code, 503)
+        current = EmailChallenge.objects.get()
+        self.assertEqual(current.code_digest, previous.code_digest)
+        self.assertEqual(current.created_at, previous.created_at)
+        self.assertEqual(self.verify(old_code).status_code, 200)

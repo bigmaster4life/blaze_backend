@@ -1,5 +1,7 @@
 """Email verification is separate from proof of phone ownership."""
+import logging
 import secrets
+from smtplib import SMTPException
 from datetime import timedelta
 
 from django.conf import settings
@@ -7,10 +9,19 @@ from django.core.mail import send_mail
 from django.db import transaction, IntegrityError
 from django.utils import timezone
 from django.utils.crypto import salted_hmac, constant_time_compare
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import APIException, ValidationError
 
 from .models import CustomUser, EmailChallenge
 from .utils import normalize_phone_gabon
+
+
+logger = logging.getLogger(__name__)
+
+
+class EmailDeliveryUnavailable(APIException):
+    status_code = 503
+    default_detail = "Envoi du code par email temporairement indisponible. Réessayez dans un instant."
+    default_code = "email_delivery_unavailable"
 
 
 def normalize_identity(phone, email):
@@ -60,8 +71,22 @@ def issue_code(phone, email, purpose):
     challenge.created_at = now
     challenge.expires_at = now + timedelta(minutes=5)
     challenge.save()
-    send_mail("Votre code Blaze", f"Votre code Blaze est : {code}. Il est valable 5 minutes.",
-              getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@blaze.com"), [email], fail_silently=False)
+    try:
+        sent = send_mail(
+            "Votre code Blaze",
+            f"Votre code Blaze est : {code}. Il est valable 5 minutes.",
+            getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@blaze.com"),
+            [email], fail_silently=False,
+        )
+    except (SMTPException, OSError) as exc:
+        # Never log credentials, OTP content or the provider's raw response.
+        logger.error("Email OTP delivery failed: exception_type=%s", type(exc).__name__)
+        raise EmailDeliveryUnavailable() from exc
+    if sent != 1:
+        logger.error("Email OTP delivery failed: message_not_sent")
+        raise EmailDeliveryUnavailable()
+    # Raising above leaves this transaction atomic: an unsent code never replaces
+    # a previous code, and failed requests do not start the resend cooldown.
 
 
 def complete_code(phone_number, email, purpose, code, new_password=None):
