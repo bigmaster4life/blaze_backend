@@ -1,4 +1,6 @@
 # RideVTC/callbacks.py
+from django.db import transaction
+from RideVTC.payment_callbacks import CallbackIdentityConflict, locked_payment, update_payment
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.views import APIView
@@ -18,34 +20,20 @@ class ProviderCallback(APIView):
         if not ok:
             return Response({"ok": False, "error": "bad_signature_or_payload"}, status=400)
 
-        # On cherche d'abord par provider_txid, sinon par idempotency/reference
-        p = None
-        if provider_txid:
-            p = Payment.objects.filter(provider_txid=provider_txid).first()
-        if not p and reference:
-            p = Payment.objects.filter(idempotency_key=reference).first()
-
-        if not p:
-            # pas trouvé → on renvoie 200 pour éviter les retries agressifs, mais on logge côté serveur
-            return Response({"ok": True, "warn": "payment_not_found"}, status=200)
-
-        new_status = map_status(provider_status)
-        if p.status != new_status:
-            p.status = new_status
-            p.save(update_fields=["status"])
-
-            # Optionnel: pousser une notif temps réel
-            try:
-                app_ws_send({
-                    "type": "payment.status",
-                    "rideId": p.ride_id,
-                    "paymentId": p.id,
-                    "status": new_status,
-                    "amount": str(p.amount),
-                    "ref": p.idempotency_key,
-                    "txid": p.provider_txid,
-                })
-            except Exception:
-                pass
-
-        return Response({"ok": True, "status": new_status})
+        try:
+            with transaction.atomic():
+                p = locked_payment(Payment, provider_txid, reference)
+                if p is None:
+                    return Response({"ok": False, "error": "payment_not_found"}, status=404)
+                changed = update_payment(p, map_status(provider_status), provider_txid)
+                if changed:
+                    payload = {
+                        "type": "payment.status", "rideId": p.ride_id,
+                        "paymentId": p.id, "status": p.status, "amount": str(p.amount),
+                        "ref": p.idempotency_key, "txid": p.provider_txid,
+                    }
+                    # Emit only after the database commit, once per status transition.
+                    transaction.on_commit(lambda: app_ws_send(payload), robust=True)
+        except CallbackIdentityConflict:
+            return Response({"ok": False, "error": "payment_identity_conflict"}, status=409)
+        return Response({"ok": True, "status": p.status})

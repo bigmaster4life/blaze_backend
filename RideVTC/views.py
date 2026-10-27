@@ -1381,42 +1381,9 @@ class MobileStatus(APIView):
         return Response({"status": p.status})
 
 
-class ProviderCallback(APIView):
-    """
-    Endpoint appelé par le provider (Airtel/Moov/CinetPay…).
-    NB: auth custom (signature/HMAC) gérée par verify_and_parse().
-    """
-    authentication_classes = []  # on gère la signature nous-mêmes
-    permission_classes = []
+# Compatibility for callers that imported the callback from views.
+from RideVTC.callbacks import ProviderCallback
 
-    def post(self, request):
-        ok, provider_txid, provider_status = verify_and_parse(request)  # signature + parsing
-        if not ok:
-            return Response(status=400)
-
-        p = Payment.objects.filter(provider_txid=provider_txid).first()
-        if not p:
-            return Response(status=404)
-
-        new_status = map_status(provider_status)  # -> "SUCCESS" / "FAILED" / "PENDING"
-        if p.status != new_status:
-            p.status = new_status
-            p.save(update_fields=["status"])
-
-            # Optionnel : pousser un event WS au client pour MAJ temps réel
-            try:
-                app_ws_send({
-                    "type": "payment.status",
-                    "requestId": p.ride_id,
-                    "paymentId": p.id,
-                    "status": new_status,
-                    "amount": str(p.amount),
-                })
-            except Exception:
-                pass
-
-        return Response({"ok": True})
-    
 class RideStatusView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 

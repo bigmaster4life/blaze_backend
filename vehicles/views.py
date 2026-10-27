@@ -1,3 +1,5 @@
+import logging
+from RideVTC.payment_callbacks import CallbackIdentityConflict, locked_payment, update_payment
 from rest_framework import viewsets, filters, permissions
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -328,22 +330,28 @@ class RentalProviderCallback(APIView):
     permission_classes = []
 
     def post(self, request):
-        ok, provider_txid, provider_status = verify_and_parse(request)
+        ok, provider_txid, provider_status, reference = verify_and_parse(request)
         if not ok:
-            return Response(status=400)
+            return Response({"ok": False, "error": "bad_signature_or_payload"}, status=400)
 
-        p = RentalPayment.objects.filter(provider_txid=provider_txid).select_related("rental").first()
-        if not p:
-            return Response(status=404)
-
-        new_status = map_status(provider_status)  # "SUCCESS" / "FAILED" / "PENDING"
-        if p.status != new_status:
-            p.status = new_status
-            p.save(update_fields=["status"])
-
-            # si paiement OK → on marque la location comme payée en mobile
-            if new_status == "SUCCESS":
-                rental = p.rental
-                rental.mark_paid_mobile(amount=p.amount)
-
-        return Response({"ok": True})
+        try:
+            with transaction.atomic():
+                p = locked_payment(RentalPayment, provider_txid, reference)
+                if p is None:
+                    # Let the provider retry if the callback preceded payment creation.
+                    return Response({"ok": False, "error": "payment_not_found"}, status=404)
+                changed = update_payment(p, map_status(provider_status), provider_txid)
+                if changed and p.status == "SUCCESS":
+                    rental = Rental.objects.select_for_update().get(pk=p.rental_id)
+                    if rental.status in ("canceled", "expired"):
+                        # Record the money received without reopening a released booking.
+                        p.meta = {**p.meta, "requires_review": True, "reason": "payment_after_rental_closed"}
+                        p.save(update_fields=["meta", "updated_at"])
+                        logging.getLogger(__name__).warning(
+                            "Rental payment requires review: payment_id=%s rental_id=%s", p.pk, rental.pk
+                        )
+                    else:
+                        rental.mark_paid_mobile(amount=p.amount)
+        except CallbackIdentityConflict:
+            return Response({"ok": False, "error": "payment_identity_conflict"}, status=409)
+        return Response({"ok": True, "status": p.status})

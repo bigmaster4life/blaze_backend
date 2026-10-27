@@ -184,7 +184,7 @@ def provider_init_payment(p: Payment) -> Tuple[bool, Optional[str], str]:
             if txid and txid != p.provider_txid:
                 p.provider_txid = txid
                 p.save(update_fields=["provider_txid"])
-        return ok, (txid or p.idempotency_key), msg
+        return ok, txid, msg
 
     return False, None, "Unsupported provider"
 
@@ -194,46 +194,45 @@ def provider_init_payment(p: Payment) -> Tuple[bool, Optional[str], str]:
 # -------------------------
 
 def verify_and_parse(request) -> tuple[bool, Optional[str], Optional[str], Optional[str]]:
-    """
-    Vérifie la signature HMAC (si configurée) et retourne:
-      (ok, provider_txid, provider_status, reference)
-    """
+    """Authenticate the raw callback body before interpreting payment fields."""
+    rejected = (False, None, None, None)
     raw = request.body or b""
-    body = {}
-    try:
-        body = json.loads(raw.decode("utf-8") or "{}")
-    except Exception:
-        body = {}
-
-    # champs possibles selon les tenants / versions
-    provider_txid = (
-        body.get("transactionId")
-        or body.get("airtelMoneyId")
-        or body.get("id")
-        or None
-    )
-    provider_status = (
-        body.get("status")
-        or (body.get("transaction") or {}).get("status")
-        or None
-    )
-    reference = (
-        body.get("reference")
-        or (body.get("transaction") or {}).get("reference")
-        or request.headers.get("X-Reference-Id")
-        or None
-    )
-
-    # Signature HMAC optionnelle
     cfg = _get_cfg()
     secret = cfg.get("WEBHOOK_SECRET")
     header_sig = request.headers.get("X-Airtel-Signature") or request.headers.get("X-Signature")
-    if secret and header_sig:
-        mac = hmac.new(secret.encode("utf-8"), raw, sha256).digest()
-        calc = base64.b64encode(mac).decode("utf-8")
-        if calc != header_sig:
-            return (False, None, None, None)
+    # Never accept callbacks when the secret or signature is absent.
+    if not isinstance(secret, str) or not secret or not isinstance(header_sig, str) or not header_sig:
+        return rejected
+    mac = hmac.new(secret.encode("utf-8"), raw, sha256).digest()
+    expected = base64.b64encode(mac)
+    try:
+        supplied = header_sig.encode("ascii")
+    except UnicodeEncodeError:
+        return rejected
+    if not hmac.compare_digest(expected, supplied):
+        return rejected
 
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return rejected
+    if not isinstance(body, dict):
+        return rejected
+    transaction = body.get("transaction")
+    if transaction is None:
+        transaction = {}
+    if not isinstance(transaction, dict):
+        return rejected
+
+    provider_txid = body.get("transactionId") or body.get("airtelMoneyId") or body.get("id") or transaction.get("id") or None
+    provider_status = body.get("status") or transaction.get("status") or None
+    reference = body.get("reference") or transaction.get("reference") or None
+    if not provider_txid and not reference:
+        return rejected
+    if not isinstance(provider_status, str) or not provider_status:
+        return rejected
+    if any(value is not None and not isinstance(value, str) for value in (provider_txid, reference)):
+        return rejected
     return (True, provider_txid, provider_status, reference)
 
 
